@@ -26,6 +26,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	v1tar "github.com/google/go-containerregistry/pkg/v1/tarball"
 	ggcrtypes "github.com/google/go-containerregistry/pkg/v1/types"
@@ -209,4 +210,39 @@ func BuildImageTarballFromLayer(ctx context.Context, imageRef string, layer v1.L
 
 	log.Infof("output image file to %s", outputTarGZ)
 	return nil
+}
+
+// ExportToOCILayout exports a v1.Image to an OCI layout directory
+func ExportToOCILayout(ctx context.Context, img v1.Image, ociDir string) (name.Digest, error) {
+	log := clog.FromContext(ctx)
+	
+	// Create a temporary tag to satisfy the layout API
+	tempTag := name.MustParseReference("temp:latest")
+	
+	// Write the image to the OCI layout directory
+	layoutPath, err := layout.Write(ociDir, empty.Index)
+	if err != nil {
+		return name.Digest{}, fmt.Errorf("failed to create OCI layout: %w", err)
+	}
+	
+	// Append the image to the layout
+	if err := layoutPath.AppendImage(img, layout.WithAnnotations(map[string]string{
+		"org.opencontainers.image.ref.name": tempTag.String(),
+	})); err != nil {
+		return name.Digest{}, fmt.Errorf("failed to append image to OCI layout: %w", err)
+	}
+	
+	// Get the digest of the image
+	digest, err := img.Digest()
+	if err != nil {
+		return name.Digest{}, fmt.Errorf("failed to get image digest: %w", err)
+	}
+	
+	nameDigest, err := name.NewDigest(fmt.Sprintf("temp@%s", digest.String()))
+	if err != nil {
+		return name.Digest{}, fmt.Errorf("failed to create name digest: %w", err)
+	}
+	
+	log.Debugf("Exported image to OCI layout at %s with digest %s", ociDir, digest)
+	return nameDigest, nil
 }
