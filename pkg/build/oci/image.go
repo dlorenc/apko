@@ -212,37 +212,26 @@ func BuildImageTarballFromLayer(ctx context.Context, imageRef string, layer v1.L
 	return nil
 }
 
-// ExportToOCILayout exports a v1.Image to an OCI layout directory
-func ExportToOCILayout(ctx context.Context, img v1.Image, ociDir string) (name.Digest, error) {
-	log := clog.FromContext(ctx)
-	
-	// Create a temporary tag to satisfy the layout API
-	tempTag := name.MustParseReference("temp:latest")
-	
-	// Write the image to the OCI layout directory
-	layoutPath, err := layout.Write(ociDir, empty.Index)
+// ExportToOCILayout exports an OCI image to an OCI layout directory structure.
+// This is used by BuildKit to load apko-generated images.
+func ExportToOCILayout(ctx context.Context, img v1.Image, outputDir string) (v1.Hash, error) {
+	// Create the OCI layout at the output directory
+	layoutPath, err := layout.Write(outputDir, empty.Index)
 	if err != nil {
-		return name.Digest{}, fmt.Errorf("failed to create OCI layout: %w", err)
+		return v1.Hash{}, fmt.Errorf("failed to create OCI layout: %w", err)
 	}
-	
+
 	// Append the image to the layout
-	if err := layoutPath.AppendImage(img, layout.WithAnnotations(map[string]string{
-		"org.opencontainers.image.ref.name": tempTag.String(),
-	})); err != nil {
-		return name.Digest{}, fmt.Errorf("failed to append image to OCI layout: %w", err)
+	if err := layoutPath.AppendImage(img); err != nil {
+		return v1.Hash{}, fmt.Errorf("failed to append image to layout: %w", err)
 	}
-	
-	// Get the digest of the image
+
+	// Get the image digest
 	digest, err := img.Digest()
 	if err != nil {
-		return name.Digest{}, fmt.Errorf("failed to get image digest: %w", err)
+		return v1.Hash{}, fmt.Errorf("failed to get image digest: %w", err)
 	}
-	
-	nameDigest, err := name.NewDigest(fmt.Sprintf("temp@%s", digest.String()))
-	if err != nil {
-		return name.Digest{}, fmt.Errorf("failed to create name digest: %w", err)
-	}
-	
-	log.Debugf("Exported image to OCI layout at %s with digest %s", ociDir, digest)
-	return nameDigest, nil
+
+	clog.FromContext(ctx).Infof("exported image to OCI layout at %s with digest %s", outputDir, digest)
+	return digest, nil
 }
