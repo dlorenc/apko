@@ -312,6 +312,11 @@ type group struct {
 type LayerGroup struct {
 	// Packages is the list of packages in this layer, sorted by name.
 	Packages []PackageRef
+
+	// AllPackages is set only for the "top" layer (which has Packages=nil).
+	// It contains all packages in the entire build, used to ensure the top
+	// layer's cache key is unique per package set.
+	AllPackages []PackageRef
 }
 
 // PackageRef identifies a package by name and version for cache key purposes.
@@ -329,6 +334,18 @@ func GroupByOriginAndSize(pkgs []*apk.Package, budget int) ([]LayerGroup, error)
 		return nil, err
 	}
 
+	// Build a sorted list of all packages for the top layer's cache key
+	allPkgRefs := make([]PackageRef, len(pkgs))
+	for i, pkg := range pkgs {
+		allPkgRefs[i] = PackageRef{
+			Name:    pkg.Name,
+			Version: pkg.Version,
+		}
+	}
+	slices.SortFunc(allPkgRefs, func(a, b PackageRef) int {
+		return cmp.Compare(a.Name, b.Name)
+	})
+
 	result := make([]LayerGroup, len(groups))
 	for i, g := range groups {
 		refs := make([]PackageRef, len(g.pkgs))
@@ -342,8 +359,8 @@ func GroupByOriginAndSize(pkgs []*apk.Package, budget int) ([]LayerGroup, error)
 	}
 
 	// Note: There's also a "top" layer for files not owned by any package.
-	// We represent this as an empty LayerGroup at the end.
-	result = append(result, LayerGroup{Packages: nil})
+	// We set AllPackages so the cache key is unique per package set.
+	result = append(result, LayerGroup{Packages: nil, AllPackages: allPkgRefs})
 
 	return result, nil
 }

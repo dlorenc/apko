@@ -57,15 +57,27 @@ func newLayerCache(config *LayerCacheConfig, arch string) *layerCache {
 
 // cacheKey computes a deterministic cache key for a layer group.
 // The key is based on the architecture and sorted package names+versions.
+// For the "top" layer (Packages=nil), it uses AllPackages to ensure uniqueness.
 func (c *layerCache) cacheKey(group LayerGroup) string {
 	h := sha256.New()
 
 	// Include architecture
 	h.Write([]byte(c.arch + "\n"))
 
+	// Determine which package list to use for the key
+	// For the "top" layer, use AllPackages; otherwise use Packages
+	var pkgRefs []PackageRef
+	if len(group.Packages) == 0 && len(group.AllPackages) > 0 {
+		// This is the "top" layer - use all packages for uniqueness
+		h.Write([]byte("top-layer\n"))
+		pkgRefs = group.AllPackages
+	} else {
+		pkgRefs = group.Packages
+	}
+
 	// Sort packages for determinism
-	pkgs := make([]string, len(group.Packages))
-	for i, p := range group.Packages {
+	pkgs := make([]string, len(pkgRefs))
+	for i, p := range pkgRefs {
 		pkgs[i] = fmt.Sprintf("%s=%s", p.Name, p.Version)
 	}
 	slices.Sort(pkgs)
@@ -85,7 +97,7 @@ type cachedLayerRef struct {
 }
 
 // checkLayers checks which layer groups exist in the registry.
-// Returns refs for layers that exist and whether all were found.
+// Returns refs for layers that exist (in order) and whether all were found.
 func (c *layerCache) checkLayers(ctx context.Context, groups []LayerGroup) ([]cachedLayerRef, bool, error) {
 	log := clog.FromContext(ctx)
 
@@ -99,10 +111,11 @@ func (c *layerCache) checkLayers(ctx context.Context, groups []LayerGroup) ([]ca
 		keys[i] = c.cacheKey(g)
 	}
 
-	// Check all layers in parallel
+	// Check all layers in parallel, preserving order with indexed slots
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	found := make([]cachedLayerRef, 0, len(groups))
+	refs := make([]cachedLayerRef, len(groups))
+	foundFlags := make([]bool, len(groups))
 	errs := make([]error, 0)
 
 	opts := []name.Option{}
@@ -114,9 +127,9 @@ func (c *layerCache) checkLayers(ctx context.Context, groups []LayerGroup) ([]ca
 		remoteOpts = append(remoteOpts, remote.WithTransport(&http.Transport{}))
 	}
 
-	for _, key := range keys {
+	for i, key := range keys {
 		wg.Add(1)
-		go func(k string) {
+		go func(idx int, k string) {
 			defer wg.Done()
 
 			ref := fmt.Sprintf("%s:%s", c.config.Registry, k)
@@ -130,10 +143,11 @@ func (c *layerCache) checkLayers(ctx context.Context, groups []LayerGroup) ([]ca
 
 			if _, err := remote.Head(imgRef, remoteOpts...); err == nil {
 				mu.Lock()
-				found = append(found, cachedLayerRef{key: k, ref: ref})
+				refs[idx] = cachedLayerRef{key: k, ref: ref}
+				foundFlags[idx] = true
 				mu.Unlock()
 			}
-		}(key)
+		}(i, key)
 	}
 	wg.Wait()
 
@@ -141,10 +155,18 @@ func (c *layerCache) checkLayers(ctx context.Context, groups []LayerGroup) ([]ca
 		log.Warnf("errors checking layer cache: %v", errs)
 	}
 
-	allCached := len(found) == len(groups)
-	log.Infof("layer cache: %d/%d layers found", len(found), len(groups))
+	// Count how many were found
+	foundCount := 0
+	for _, found := range foundFlags {
+		if found {
+			foundCount++
+		}
+	}
 
-	return found, allCached, nil
+	allCached := foundCount == len(groups)
+	log.Infof("layer cache: %d/%d layers found", foundCount, len(groups))
+
+	return refs, allCached, nil
 }
 
 // pullLayers retrieves cached layers from the registry.
