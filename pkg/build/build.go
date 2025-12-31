@@ -64,6 +64,11 @@ type Context struct {
 	fs      apkfs.FullFS
 	apk     *apk.APK
 	baseimg *baseimg.BaseImage
+
+	// layerCacheConfig is optional configuration for layer caching.
+	// When set, BuildLayers will check the cache before building and
+	// push newly built layers to the cache.
+	layerCacheConfig *LayerCacheConfig
 }
 
 func (bc *Context) Summarize(ctx context.Context) {

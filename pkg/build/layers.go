@@ -44,6 +44,17 @@ func (bc *Context) buildLayers(ctx context.Context) ([]v1.Layer, error) {
 		return nil, fmt.Errorf("layering with %q is unsupported", "baseimage")
 	}
 
+	// Check layer cache before building if configured
+	if bc.layerCacheConfig != nil && bc.layerCacheConfig.Registry != "" {
+		layers, ok, err := bc.tryLayerCache(ctx)
+		if err != nil {
+			log.Warnf("layer cache check failed, falling back to full build: %v", err)
+		} else if ok {
+			return layers, nil
+		}
+		// Partial or no cache hit - continue with full build
+	}
+
 	// Build a single fs.FS, the normal way (this writes to bc.fs).
 	diffs, err := bc.buildImage(ctx)
 	if err != nil {
@@ -85,7 +96,60 @@ func (bc *Context) buildLayers(ctx context.Context) ([]v1.Layer, error) {
 	}
 
 	// Then partition that single fs.FS into multiple layers based on our layering strategy.
-	return splitLayers(ctx, bc.fs, groups, pkgToDiff, bc.o.TempDir())
+	layers, err := splitLayers(ctx, bc.fs, groups, pkgToDiff, bc.o.TempDir())
+	if err != nil {
+		return nil, err
+	}
+
+	// Push newly built layers to cache if configured
+	if bc.layerCacheConfig != nil && bc.layerCacheConfig.Registry != "" {
+		predictedGroups, err := bc.PredictLayerGroups(ctx)
+		if err != nil {
+			log.Warnf("failed to get layer groups for cache push: %v", err)
+		} else if len(layers) == len(predictedGroups) {
+			cache := newLayerCache(bc.layerCacheConfig, string(bc.o.Arch))
+			if err := cache.pushLayers(ctx, layers, predictedGroups); err != nil {
+				log.Warnf("failed to push layers to cache: %v", err)
+			}
+		}
+	}
+
+	return layers, nil
+}
+
+// tryLayerCache checks if all layers exist in cache and returns them if so.
+// Returns (layers, true, nil) on full cache hit, (nil, false, nil) on miss,
+// or (nil, false, err) on error.
+func (bc *Context) tryLayerCache(ctx context.Context) ([]v1.Layer, bool, error) {
+	log := clog.FromContext(ctx)
+
+	// Predict what layers would be built
+	predictedGroups, err := bc.PredictLayerGroups(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("predicting layer groups: %w", err)
+	}
+	log.Infof("predicted %d layer groups", len(predictedGroups))
+
+	// Check which layers are cached
+	cache := newLayerCache(bc.layerCacheConfig, string(bc.o.Arch))
+	cachedRefs, allCached, err := cache.checkLayers(ctx, predictedGroups)
+	if err != nil {
+		return nil, false, fmt.Errorf("checking layer cache: %w", err)
+	}
+
+	if !allCached {
+		log.Infof("partial cache hit: %d/%d layers cached, building all", len(cachedRefs), len(predictedGroups))
+		return nil, false, nil
+	}
+
+	// All layers cached - pull and return
+	log.Infof("all %d layers cached, skipping build", len(predictedGroups))
+	layers, err := cache.pullLayers(ctx, cachedRefs)
+	if err != nil {
+		return nil, false, fmt.Errorf("pulling cached layers: %w", err)
+	}
+
+	return layers, true, nil
 }
 
 func replacesGroup(rep string, g *group) (bool, error) {

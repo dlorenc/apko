@@ -236,3 +236,19 @@ func WithTransport(t http.RoundTripper) Option {
 		return nil
 	}
 }
+
+// WithLayerCache enables per-layer caching for BuildLayers.
+// When configured, apko will:
+// - Check the cache before building layers
+// - Skip building layers that already exist in the cache
+// - Push newly built layers to the cache
+// This enables sharing of common base layers across builds.
+func WithLayerCache(registry string, insecure bool) Option {
+	return func(bc *Context) error {
+		bc.layerCacheConfig = &LayerCacheConfig{
+			Registry: registry,
+			Insecure: insecure,
+		}
+		return nil
+	}
+}
