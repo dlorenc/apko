@@ -243,6 +243,47 @@ type group struct {
 	tiebreaker string
 }
 
+// LayerGroup represents a group of packages that will be placed in the same layer.
+// This is used for cache key computation before building.
+type LayerGroup struct {
+	// Packages is the list of packages in this layer, sorted by name.
+	Packages []PackageRef
+}
+
+// PackageRef identifies a package by name and version for cache key purposes.
+type PackageRef struct {
+	Name    string
+	Version string
+}
+
+// GroupByOriginAndSize groups packages by their origin and size for layering.
+// This is the same algorithm used internally by BuildLayers.
+// The budget parameter controls the maximum number of layers (0 means unlimited).
+func GroupByOriginAndSize(pkgs []*apk.Package, budget int) ([]LayerGroup, error) {
+	groups, err := groupByOriginAndSize(pkgs, budget)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]LayerGroup, len(groups))
+	for i, g := range groups {
+		refs := make([]PackageRef, len(g.pkgs))
+		for j, pkg := range g.pkgs {
+			refs[j] = PackageRef{
+				Name:    pkg.Name,
+				Version: pkg.Version,
+			}
+		}
+		result[i] = LayerGroup{Packages: refs}
+	}
+
+	// Note: There's also a "top" layer for files not owned by any package.
+	// We represent this as an empty LayerGroup at the end.
+	result = append(result, LayerGroup{Packages: nil})
+
+	return result, nil
+}
+
 func merge(groups ...*group) *group {
 	merged := &group{}
 	for _, g := range groups {

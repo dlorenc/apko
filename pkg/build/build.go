@@ -160,6 +160,35 @@ func (bc *Context) BuildLayers(ctx context.Context) ([]v1.Layer, error) {
 	return bc.buildLayers(ctx)
 }
 
+// PredictLayerGroups resolves packages and predicts what layers would be created
+// without actually building the image. This is useful for cache key computation.
+// Returns layer groups containing package references (name, version) for each layer.
+func (bc *Context) PredictLayerGroups(ctx context.Context) ([]LayerGroup, error) {
+	ctx, span := otel.Tracer("apko").Start(ctx, "PredictLayerGroups")
+	defer span.End()
+
+	// Determine the budget
+	budget := 0
+	if bc.ic.Layering != nil {
+		budget = bc.ic.Layering.Budget
+	}
+
+	// Resolve packages without installing
+	repoPkgs, _, err := bc.apk.ResolveWorld(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolving packages: %w", err)
+	}
+
+	// Convert RepositoryPackage slice to Package slice for grouping
+	pkgs := make([]*apk.Package, len(repoPkgs))
+	for i, rp := range repoPkgs {
+		pkgs[i] = rp.Package
+	}
+
+	// Run the same grouping algorithm used by BuildLayers
+	return GroupByOriginAndSize(pkgs, budget)
+}
+
 // ImageLayoutToLayer given an already built-out
 // image in an fs from BuildImage(), create
 // an OCI image layer tgz.
