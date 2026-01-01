@@ -16,6 +16,8 @@ package types
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"hash"
 	"maps"
@@ -306,4 +308,180 @@ func gidToInt(gid GID) uint32 {
 		return 0
 	}
 	return *gid
+}
+
+// Hash computes a deterministic hash of the image configuration.
+// This hash can be used as a cache key for image builds.
+// The hash includes all configuration elements that affect the build output.
+func (ic *ImageConfiguration) Hash(arch Architecture) string {
+	h := newHasher()
+
+	// Architecture affects the build output
+	h.writeString("arch", arch.String())
+
+	// Contents determine what packages are installed
+	h.writeStrings("contents.build_repos", ic.Contents.BuildRepositories)
+	h.writeStrings("contents.runtime_repos", ic.Contents.RuntimeOnlyRepositories)
+	h.writeStrings("contents.repos", ic.Contents.Repositories)
+	h.writeStrings("contents.keyring", ic.Contents.Keyring)
+	h.writeStrings("contents.packages", ic.Contents.Packages)
+	if ic.Contents.BaseImage != nil {
+		h.writeString("contents.base_image.image", ic.Contents.BaseImage.Image)
+	}
+
+	// Entrypoint affects container runtime behavior
+	h.writeString("entrypoint.type", ic.Entrypoint.Type)
+	h.writeString("entrypoint.command", ic.Entrypoint.Command)
+	h.writeString("entrypoint.shell_fragment", ic.Entrypoint.ShellFragment)
+	h.writeStrings("entrypoint.services", servicesToStrings(ic.Entrypoint.Services))
+
+	// Other container configuration
+	h.writeString("cmd", ic.Cmd)
+	h.writeString("stop_signal", ic.StopSignal)
+	h.writeString("work_dir", ic.WorkDir)
+
+	// Accounts
+	h.writeString("accounts.runas", ic.Accounts.RunAs)
+	h.writeUsers("accounts.users", ic.Accounts.Users)
+	h.writeGroups("accounts.groups", ic.Accounts.Groups)
+
+	// Environment - sorted for determinism
+	h.writeMap("environment", ic.Environment)
+
+	// Paths
+	h.writePaths("paths", ic.Paths)
+
+	// Annotations - sorted for determinism
+	h.writeMap("annotations", ic.Annotations)
+
+	// Volumes
+	h.writeStrings("volumes", ic.Volumes)
+
+	// Layering affects image structure
+	if ic.Layering != nil {
+		h.writeString("layering.strategy", ic.Layering.Strategy)
+		h.writeInt("layering.budget", ic.Layering.Budget)
+	}
+
+	// Certificates
+	if ic.Certificates != nil {
+		for i, cert := range ic.Certificates.Additional {
+			prefix := fmt.Sprintf("certificates.additional.%d", i)
+			h.writeString(prefix+".name", cert.Name)
+			h.writeString(prefix+".content", cert.Content)
+		}
+	}
+
+	return h.sum()
+}
+
+// hashWriter is a helper for computing deterministic hashes.
+type hashWriter struct {
+	h hash.Hash
+}
+
+func newHasher() *hashWriter {
+	return &hashWriter{h: sha256.New()}
+}
+
+func (hw *hashWriter) writeString(key, value string) {
+	hw.h.Write([]byte(key))
+	hw.h.Write([]byte{0})
+	hw.h.Write([]byte(value))
+	hw.h.Write([]byte{0})
+}
+
+func (hw *hashWriter) writeStrings(key string, values []string) {
+	hw.h.Write([]byte(key))
+	hw.h.Write([]byte{0})
+	// Sort for determinism
+	sorted := slices.Clone(values)
+	slices.Sort(sorted)
+	for _, v := range sorted {
+		hw.h.Write([]byte(v))
+		hw.h.Write([]byte{0})
+	}
+	hw.h.Write([]byte{0})
+}
+
+func (hw *hashWriter) writeMap(key string, m map[string]string) {
+	hw.h.Write([]byte(key))
+	hw.h.Write([]byte{0})
+	// Sort keys for determinism
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		hw.h.Write([]byte(k))
+		hw.h.Write([]byte{0})
+		hw.h.Write([]byte(m[k]))
+		hw.h.Write([]byte{0})
+	}
+	hw.h.Write([]byte{0})
+}
+
+func (hw *hashWriter) writeInt(key string, value int) {
+	hw.h.Write([]byte(key))
+	hw.h.Write([]byte{0})
+	hw.h.Write([]byte(fmt.Sprintf("%d", value)))
+	hw.h.Write([]byte{0})
+}
+
+func (hw *hashWriter) writeBool(key string, value bool) {
+	hw.h.Write([]byte(key))
+	hw.h.Write([]byte{0})
+	if value {
+		hw.h.Write([]byte("true"))
+	} else {
+		hw.h.Write([]byte("false"))
+	}
+	hw.h.Write([]byte{0})
+}
+
+func (hw *hashWriter) writeUsers(key string, users []User) {
+	hw.h.Write([]byte(key))
+	hw.h.Write([]byte{0})
+	for _, u := range users {
+		hw.h.Write([]byte(fmt.Sprintf("%s:%d:%v:%s:%s",
+			u.UserName, u.UID, gidToInt(u.GID), u.HomeDir, u.Shell)))
+		hw.h.Write([]byte{0})
+	}
+	hw.h.Write([]byte{0})
+}
+
+func (hw *hashWriter) writeGroups(key string, groups []Group) {
+	hw.h.Write([]byte(key))
+	hw.h.Write([]byte{0})
+	for _, g := range groups {
+		hw.h.Write([]byte(fmt.Sprintf("%s:%d:%v", g.GroupName, g.GID, g.Members)))
+		hw.h.Write([]byte{0})
+	}
+	hw.h.Write([]byte{0})
+}
+
+func (hw *hashWriter) writePaths(key string, paths []PathMutation) {
+	hw.h.Write([]byte(key))
+	hw.h.Write([]byte{0})
+	for _, p := range paths {
+		hw.h.Write([]byte(fmt.Sprintf("%s:%s:%d:%d:%d:%t",
+			p.Path, p.Type, p.UID, p.GID, p.Permissions, p.Recursive)))
+		hw.h.Write([]byte{0})
+	}
+	hw.h.Write([]byte{0})
+}
+
+func (hw *hashWriter) sum() string {
+	return hex.EncodeToString(hw.h.Sum(nil))
+}
+
+// servicesToStrings converts a map of services to a sorted slice of strings.
+func servicesToStrings(services map[string]string) []string {
+	result := make([]string, 0, len(services))
+	for name, command := range services {
+		result = append(result, fmt.Sprintf("%s:%s", name, command))
+	}
+	slices.Sort(result)
+	return result
 }

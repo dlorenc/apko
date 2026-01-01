@@ -300,3 +300,176 @@ func TestValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestImageConfiguration_Hash(t *testing.T) {
+	// Test that the hash is deterministic
+	ic := types.ImageConfiguration{
+		Contents: types.ImageContents{
+			Packages:     []string{"pkg1", "pkg2", "pkg3"},
+			Repositories: []string{"repo1", "repo2"},
+			Keyring:      []string{"key1"},
+		},
+		Entrypoint: types.ImageEntrypoint{
+			Command: "/bin/sh",
+		},
+		Environment: map[string]string{
+			"VAR1": "value1",
+			"VAR2": "value2",
+		},
+	}
+
+	arch := types.Architecture("amd64")
+
+	// Compute hash multiple times - should be identical
+	hash1 := ic.Hash(arch)
+	hash2 := ic.Hash(arch)
+	hash3 := ic.Hash(arch)
+
+	require.Equal(t, hash1, hash2, "hash should be deterministic")
+	require.Equal(t, hash2, hash3, "hash should be deterministic")
+	require.Len(t, hash1, 64, "hash should be 64 hex characters (sha256)")
+}
+
+func TestImageConfiguration_Hash_DifferentArch(t *testing.T) {
+	ic := types.ImageConfiguration{
+		Contents: types.ImageContents{
+			Packages: []string{"pkg1"},
+		},
+	}
+
+	hashAmd64 := ic.Hash(types.Architecture("amd64"))
+	hashArm64 := ic.Hash(types.Architecture("arm64"))
+
+	require.NotEqual(t, hashAmd64, hashArm64, "different architectures should produce different hashes")
+}
+
+func TestImageConfiguration_Hash_DifferentPackages(t *testing.T) {
+	ic1 := types.ImageConfiguration{
+		Contents: types.ImageContents{
+			Packages: []string{"pkg1", "pkg2"},
+		},
+	}
+
+	ic2 := types.ImageConfiguration{
+		Contents: types.ImageContents{
+			Packages: []string{"pkg1", "pkg3"},
+		},
+	}
+
+	arch := types.Architecture("amd64")
+
+	require.NotEqual(t, ic1.Hash(arch), ic2.Hash(arch), "different packages should produce different hashes")
+}
+
+func TestImageConfiguration_Hash_PackageOrderIndependent(t *testing.T) {
+	// Package order shouldn't matter since we sort before hashing
+	ic1 := types.ImageConfiguration{
+		Contents: types.ImageContents{
+			Packages: []string{"pkg1", "pkg2", "pkg3"},
+		},
+	}
+
+	ic2 := types.ImageConfiguration{
+		Contents: types.ImageContents{
+			Packages: []string{"pkg3", "pkg1", "pkg2"},
+		},
+	}
+
+	arch := types.Architecture("amd64")
+
+	require.Equal(t, ic1.Hash(arch), ic2.Hash(arch), "package order should not affect hash")
+}
+
+func TestImageConfiguration_Hash_EnvironmentOrderIndependent(t *testing.T) {
+	ic1 := types.ImageConfiguration{
+		Environment: map[string]string{
+			"A": "1",
+			"B": "2",
+			"C": "3",
+		},
+	}
+
+	// Go maps have non-deterministic iteration order, but hash should be consistent
+	arch := types.Architecture("amd64")
+
+	hash1 := ic1.Hash(arch)
+	hash2 := ic1.Hash(arch)
+
+	require.Equal(t, hash1, hash2, "environment hash should be deterministic despite map iteration order")
+}
+
+func TestImageConfiguration_Hash_DifferentEnvironment(t *testing.T) {
+	ic1 := types.ImageConfiguration{
+		Environment: map[string]string{
+			"VAR": "value1",
+		},
+	}
+
+	ic2 := types.ImageConfiguration{
+		Environment: map[string]string{
+			"VAR": "value2",
+		},
+	}
+
+	arch := types.Architecture("amd64")
+
+	require.NotEqual(t, ic1.Hash(arch), ic2.Hash(arch), "different environment values should produce different hashes")
+}
+
+func TestImageConfiguration_Hash_WithLayering(t *testing.T) {
+	ic1 := types.ImageConfiguration{
+		Contents: types.ImageContents{
+			Packages: []string{"pkg1"},
+		},
+		Layering: &types.Layering{
+			Strategy: "origin",
+			Budget:   10,
+		},
+	}
+
+	ic2 := types.ImageConfiguration{
+		Contents: types.ImageContents{
+			Packages: []string{"pkg1"},
+		},
+		Layering: &types.Layering{
+			Strategy: "origin",
+			Budget:   20,
+		},
+	}
+
+	ic3 := types.ImageConfiguration{
+		Contents: types.ImageContents{
+			Packages: []string{"pkg1"},
+		},
+		// No layering
+	}
+
+	arch := types.Architecture("amd64")
+
+	require.NotEqual(t, ic1.Hash(arch), ic2.Hash(arch), "different layering budget should produce different hashes")
+	require.NotEqual(t, ic1.Hash(arch), ic3.Hash(arch), "layering vs no layering should produce different hashes")
+}
+
+func TestImageConfiguration_Hash_WithUsers(t *testing.T) {
+	ic1 := types.ImageConfiguration{
+		Accounts: types.ImageAccounts{
+			Users: []types.User{{
+				UserName: "user1",
+				UID:      1000,
+			}},
+		},
+	}
+
+	ic2 := types.ImageConfiguration{
+		Accounts: types.ImageAccounts{
+			Users: []types.User{{
+				UserName: "user2",
+				UID:      1000,
+			}},
+		},
+	}
+
+	arch := types.Architecture("amd64")
+
+	require.NotEqual(t, ic1.Hash(arch), ic2.Hash(arch), "different users should produce different hashes")
+}

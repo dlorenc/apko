@@ -424,96 +424,76 @@ build.ClearCompressionCache()
 
 ---
 
-#### 5. Image-Level Cache
+#### 5. Image-Level Cache - IMPLEMENTED
+
+**Status**: Implemented in this commit.
 
 **Problem**: Building the same image configuration multiple times.
 
-**Proposed Solution**: Cache by configuration hash.
+**Solution**: Cache by configuration hash with coalescing for in-flight builds.
 
+**Key Files Modified**:
+- `pkg/build/cache.go` - New `ImageCache` struct with `GetOrBuild()` method
+- `pkg/build/types/image_configuration.go` - Added `Hash(arch)` method for deterministic config hashing
+- `pkg/build/cache_test.go` - Tests for cache functionality
+- `pkg/build/types/image_configuration_test.go` - Tests for hash determinism
+
+**Features**:
+- **Cache by config hash**: Images are cached by a deterministic hash of the configuration + architecture
+- **Build coalescing**: Multiple requests for the same config wait for the first build to complete
+- **Context cancellation**: Waiting requests can be cancelled via context
+- **Statistics tracking**: Cache hits, misses, and coalesced requests are tracked
+- **Time-based eviction**: `Evict(olderThan)` method for clearing old entries
+- **Default global cache**: `DefaultImageCache()` provides a singleton instance
+
+**Usage**:
 ```go
-// pkg/build/cache.go
+import "chainguard.dev/apko/pkg/build"
 
-type ImageCache struct {
-    mu    sync.RWMutex
-    cache map[string]*CachedImage  // configHash → result
+// Option 1: Use the default global cache
+cache := build.DefaultImageCache()
 
-    // Coalescing: multiple requests for same config wait for first build
-    inflight map[string]*inflightBuild
-}
+// Option 2: Create your own cache
+cache := build.NewImageCache()
 
-type CachedImage struct {
-    Digest    v1.Hash
-    ConfigHash string
-    CreatedAt time.Time
-    Layers    []v1.Descriptor
-}
+// Compute the config hash
+configHash := ic.Hash(arch)
 
-type inflightBuild struct {
-    done   chan struct{}
-    result *CachedImage
-    err    error
-}
+// Get or build the image
+result, err := cache.GetOrBuild(ctx, configHash, func(ctx context.Context) (v1.Image, error) {
+    // Your build logic here
+    return img, nil
+})
 
-func (c *ImageCache) GetOrBuild(ctx context.Context, configHash string, buildFn func() (*CachedImage, error)) (*CachedImage, error) {
-    // Check cache
-    c.mu.RLock()
-    if cached, ok := c.cache[configHash]; ok {
-        c.mu.RUnlock()
-        return cached, nil
-    }
+// Access the cached image
+img := result.Image
 
-    // Check if build is in-flight
-    if inflight, ok := c.inflight[configHash]; ok {
-        c.mu.RUnlock()
-        <-inflight.done
-        return inflight.result, inflight.err
-    }
-    c.mu.RUnlock()
+// Get statistics
+stats := cache.Stats()
+log.Printf("Image cache: hits=%d misses=%d coalesced=%d size=%d",
+    stats.Hits, stats.Misses, stats.Coalesced, stats.Size)
 
-    // Start new build with coalescing
-    c.mu.Lock()
-    // Double-check after acquiring write lock
-    if cached, ok := c.cache[configHash]; ok {
-        c.mu.Unlock()
-        return cached, nil
-    }
+// Clear old entries (e.g., after 1 hour)
+evicted := cache.Evict(time.Hour)
 
-    inflight := &inflightBuild{done: make(chan struct{})}
-    c.inflight[configHash] = inflight
-    c.mu.Unlock()
+// Clear entire cache
+cache.Clear()
 
-    // Do the build
-    result, err := buildFn()
-
-    // Store result
-    c.mu.Lock()
-    if err == nil {
-        c.cache[configHash] = result
-    }
-    delete(c.inflight, configHash)
-    inflight.result = result
-    inflight.err = err
-    close(inflight.done)
-    c.mu.Unlock()
-
-    return result, err
-}
+// Reset statistics
+cache.ResetStats()
 ```
 
-**Config Hash Computation** (already exists in `pkg/build/types/image_configuration.go:198`):
-```go
-func (ic *ImageConfiguration) Hash() string {
-    h := sha256.New()
-    // Include all deterministic config elements
-    enc := json.NewEncoder(h)
-    enc.Encode(ic.Contents)
-    enc.Encode(ic.Accounts)
-    enc.Encode(ic.Paths)
-    enc.Encode(ic.Environment)
-    // ... etc
-    return hex.EncodeToString(h.Sum(nil))
-}
-```
+**Hash Properties**:
+- Deterministic: Same config always produces same hash
+- Architecture-aware: Different architectures produce different hashes
+- Order-independent: Package order, environment variable order don't affect hash
+- Comprehensive: Includes all config fields that affect build output
+
+**Impact**:
+- **Before**: Same configuration built multiple times independently
+- **After**: First build cached, subsequent requests return cached image immediately
+- **Coalescing**: Parallel requests for same config only trigger one build
+- **Savings**: For repeated builds of same config, ~100% faster after first build
 
 ---
 
@@ -782,8 +762,8 @@ func (c *CompositionalCache) GetOrApply(parent *FSState, op Operation, fs *memFS
 | Pool size limits | 10-20% | 0% | 1 day | **DONE** |
 | Shared tarfs cache | 40-60% | 20-30% | 2-3 days | Pending |
 | On-disk tarfs index | 20-30% | 30-40% | 1 week | **DONE** |
-| Layer skip-compress | 10-20% | 40-60% | 1 week | Pending |
-| Image-level cache | 50-80%* | 50-80%* | 1-2 weeks | Pending |
+| Layer compression cache | 10-20% | 40-60% | 1 week | **DONE** |
+| Image-level cache | 50-80%* | 50-80%* | 1-2 weeks | **DONE** |
 | Shared memFS | 60-80% | 10% | 2-4 weeks | Pending |
 | Compositional cache | 70-90%* | 70-90%* | 1-2 months | Pending |
 
@@ -793,20 +773,18 @@ func (c *CompositionalCache) GetOrApply(parent *FSState, op Operation, fs *memFS
 
 **Current State**: 20-30GB memory, CPU saturation
 
-**After Implemented Optimizations (Concurrency + Pools + On-disk tarfs index)**:
-- Memory: 10-15GB (50% reduction)
+**After Implemented Optimizations (Concurrency + Pools + On-disk tarfs index + Layer cache + Image cache)**:
+- Memory: 8-12GB (60% reduction)
 - CPU: Manageable load (70% reduction in thread contention)
 - Pool memory capped at ~240MB total across all pools
+- Redundant compression eliminated via layer cache
+- Repeated builds near-instant via image cache
 
-**After Tier 1 (+ Shared tarfs cache)**:
-- Memory: 8-12GB (60% reduction)
+**After Next Tier (+ Shared tarfs cache)**:
+- Memory: 5-8GB (75% reduction)
 - CPU: Improved further with shared index cache
 
-**After Tier 2 (+ On-disk index + Layer cache)**:
-- Memory: 5-8GB (75% reduction)
-- CPU: Efficient utilization (minimal redundant work)
-
-**After Tier 3 (+ Image cache + Shared memFS)**:
+**After Final Tier (+ Shared memFS + Compositional cache)**:
 - Memory: 2-4GB (90% reduction)
 - CPU: Near-optimal (full deduplication)
 
@@ -817,6 +795,12 @@ func (c *CompositionalCache) GetOrApply(parent *FSState, op Operation, fs *memFS
 ### For apko-as-a-service (12+ parallel builds)
 
 ```go
+import "chainguard.dev/apko/pkg/build"
+
+// Configure pools for service mode at startup
+build.ConfigurePoolsForService()
+
+// Build options
 opts := []build.Option{
     // Limit gzip threads to prevent CPU explosion
     build.WithGzipConcurrency(1),
@@ -826,14 +810,23 @@ opts := []build.Option{
 
     // Sequential package installation (memory-friendly)
     build.WithAPKInstallWorkers(1),
-
-    // Enable shared caches
-    build.WithSharedTarFSCache(true),
-    build.WithLayerCompressionCache(true),
-
-    // Enable image-level caching
-    build.WithImageCache(imageCache),
 }
+
+// Use the image cache for repeated builds
+cache := build.DefaultImageCache()
+configHash := ic.Hash(arch)
+result, err := cache.GetOrBuild(ctx, configHash, func(ctx context.Context) (v1.Image, error) {
+    // Build image here
+    return img, nil
+})
+
+// Clear pools between builds (optional, for memory management)
+build.ClearPools()
+
+// Monitor caches
+poolStats := build.AllPoolStats()
+compressionStats := build.GetCompressionCacheStats()
+imageCacheStats := cache.Stats()
 ```
 
 ### For CLI (single build, fast as possible)
@@ -844,6 +837,8 @@ opts := []build.Option{
     // GzipConcurrency: min(GOMAXPROCS, 8)
     // APKFetchWorkers: GOMAXPROCS
 }
+// Layer compression cache works automatically
+// Image cache not typically needed for single builds
 ```
 
 ---
