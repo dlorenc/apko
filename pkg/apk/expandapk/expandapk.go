@@ -29,9 +29,10 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
-// DefaultExpandAPKPoolSize is the maximum number of items to retain in each pool.
-// Each buffer is 1MB, so 20 items = 20MB max per pool.
-const DefaultExpandAPKPoolSize = 20
+// DefaultExpandAPKPoolSize is the default maximum number of items to retain in each pool.
+// 0 means uncapped (standard sync.Pool behavior).
+// For services, use options.RecommendedExpandAPKPoolSize (20, ~20MB per pool).
+const DefaultExpandAPKPoolSize = 0
 
 // slicePool is a bounded pool of 1MB byte slices for I/O operations.
 var slicePool = pool.NewBoundedPool(DefaultExpandAPKPoolSize, func() any {

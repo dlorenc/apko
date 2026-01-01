@@ -31,9 +31,10 @@ import (
 	"chainguard.dev/apko/internal/pool"
 )
 
-// DefaultTarFSPoolSize is the maximum number of items to retain in the pool.
-// Each reader is 1MB, so 20 items = 20MB max.
-const DefaultTarFSPoolSize = 20
+// DefaultTarFSPoolSize is the default maximum number of items to retain in the pool.
+// 0 means uncapped (standard sync.Pool behavior).
+// For services, use options.RecommendedTarFSPoolSize (20, ~20MB).
+const DefaultTarFSPoolSize = 0
 
 // readerPool is a bounded pool of 1MB bufio readers.
 var readerPool = pool.NewBoundedPool(DefaultTarFSPoolSize, func() any {

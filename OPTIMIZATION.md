@@ -312,22 +312,45 @@ opts := []build.Option{
 - `pkg/apk/expandapk/expandapk.go` - Updated slicePool, readerPool, writerPool
 - `internal/tarfs/tarfs.go` - Updated readerPool
 
-**Pool Size Limits**:
-| Pool | Max Items | Memory Cap |
-|------|-----------|------------|
-| pgzip-concurrency-N | 10 | ~80MB per concurrency level |
-| bufio-writer | 20 | ~80MB |
-| expandapk-slice | 20 | ~20MB |
-| expandapk-reader | 20 | ~20MB |
-| expandapk-writer | 20 | ~20MB |
-| tarfs-reader | 20 | ~20MB |
+**Pool Size Limits** (configurable via `options.Options`):
+| Pool | Default | Recommended | Memory Cap |
+|------|---------|-------------|------------|
+| pgzip-concurrency-N | 0 (uncapped) | 10 | ~80MB per level |
+| bufio-writer | 0 (uncapped) | 20 | ~80MB |
+| expandapk-slice | 0 (uncapped) | 20 | ~20MB |
+| expandapk-reader | 0 (uncapped) | 20 | ~20MB |
+| expandapk-writer | 0 (uncapped) | 20 | ~20MB |
+| tarfs-reader | 0 (uncapped) | 20 | ~20MB |
 
 **Usage**:
 ```go
-// For long-running services, clear pools between builds:
-import "chainguard.dev/apko/pkg/build"
+import (
+    "chainguard.dev/apko/pkg/build"
+    "chainguard.dev/apko/pkg/options"
+)
 
-// Clear all registered pools (triggers GC)
+// Option 1: Configure pools for service mode (uses recommended sizes)
+build.ConfigurePoolsForService()
+
+// Option 2: Configure with custom sizes via options
+opts := &options.Options{
+    GzipPoolSize:      options.RecommendedGzipPoolSize,      // 10
+    BufioPoolSize:     options.RecommendedBufioPoolSize,     // 20
+    ExpandAPKPoolSize: options.RecommendedExpandAPKPoolSize, // 20
+    TarFSPoolSize:     options.RecommendedTarFSPoolSize,     // 20
+}
+build.ConfigurePoolsFromOptions(opts)
+
+// Option 3: Use 0 for any pool size to leave it uncapped (default behavior)
+opts := &options.Options{
+    GzipPoolSize:      5,  // Limit gzip pools
+    BufioPoolSize:     0,  // Leave bufio uncapped
+    ExpandAPKPoolSize: 10, // Limit expandapk pools
+    TarFSPoolSize:     0,  // Leave tarfs uncapped
+}
+build.ConfigurePoolsFromOptions(opts)
+
+// Clear all registered pools between builds (triggers GC)
 build.ClearPools()
 
 // Get pool statistics for monitoring

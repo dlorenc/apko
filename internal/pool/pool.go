@@ -113,6 +113,13 @@ func (p *BoundedPool) Stats() Stats {
 	}
 }
 
+// SetMaxSize updates the maximum pool size.
+// If maxSize is 0 or negative, the pool becomes uncapped.
+// This can be called at any time and takes effect immediately for subsequent Put operations.
+func (p *BoundedPool) SetMaxSize(maxSize int) {
+	p.maxSize = int64(maxSize)
+}
+
 // ResetMetrics resets the hit/miss/drop counters.
 func (p *BoundedPool) ResetMetrics() {
 	p.hits.Store(0)

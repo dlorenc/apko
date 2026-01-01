@@ -76,6 +76,27 @@ type Options struct {
 	// When set to 0 (default), uses GOMAXPROCS workers.
 	// For memory-constrained environments, set to 1 for sequential installation.
 	APKInstallWorkers int `json:"apkInstallWorkers,omitempty"`
+
+	// Pool size controls for memory management in long-running services.
+	// These limit the number of items retained in sync.Pool instances to prevent unbounded memory growth.
+	// When set to 0 (default), pools are uncapped (standard sync.Pool behavior).
+	// For apko-as-a-service, use the Recommended*PoolSize constants.
+
+	// GzipPoolSize controls the maximum number of gzip writers retained per concurrency level.
+	// 0 = uncapped (default). Recommended: 10 for services (~80MB per concurrency level).
+	GzipPoolSize int `json:"gzipPoolSize,omitempty"`
+
+	// BufioPoolSize controls the maximum number of 4MB bufio writers retained.
+	// 0 = uncapped (default). Recommended: 20 for services (~80MB total).
+	BufioPoolSize int `json:"bufioPoolSize,omitempty"`
+
+	// ExpandAPKPoolSize controls the maximum items in expandapk pools (slice, reader, writer).
+	// 0 = uncapped (default). Recommended: 20 for services (~20MB per pool, ~60MB total).
+	ExpandAPKPoolSize int `json:"expandApkPoolSize,omitempty"`
+
+	// TarFSPoolSize controls the maximum number of 1MB bufio readers for tarfs.
+	// 0 = uncapped (default). Recommended: 20 for services (~20MB total).
+	TarFSPoolSize int `json:"tarfsPoolSize,omitempty"`
 }
 
 type Auth struct{ User, Pass string }
@@ -137,3 +158,12 @@ func (o Options) EffectiveAPKInstallWorkers() int {
 	}
 	return runtime.GOMAXPROCS(0)
 }
+
+// Recommended pool sizes for apko-as-a-service with 12+ concurrent builds.
+// Use these values with the pool size options to limit memory usage.
+const (
+	RecommendedGzipPoolSize      = 10 // ~80MB per concurrency level
+	RecommendedBufioPoolSize     = 20 // ~80MB total
+	RecommendedExpandAPKPoolSize = 20 // ~20MB per pool
+	RecommendedTarFSPoolSize     = 20 // ~20MB total
+)

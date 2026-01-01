@@ -55,12 +55,14 @@ import (
 var defaultGzipThreads = min(runtime.GOMAXPROCS(0), 8)
 
 // DefaultBufioPoolSize is the default maximum number of bufio writers to retain in the pool.
-// Each writer is 4MB, so 20 writers = 80MB max memory for bufio pool.
-const DefaultBufioPoolSize = 20
+// 0 means uncapped (standard sync.Pool behavior).
+// For services, use options.RecommendedBufioPoolSize (20, ~80MB).
+const DefaultBufioPoolSize = 0
 
 // DefaultGzipPoolSize is the default maximum number of gzip writers to retain per concurrency level.
-// Each writer is ~8MB (1MB blocks × 8 threads at default), so 10 writers = 80MB max per concurrency level.
-const DefaultGzipPoolSize = 10
+// 0 means uncapped (standard sync.Pool behavior).
+// For services, use options.RecommendedGzipPoolSize (10, ~80MB per level).
+const DefaultGzipPoolSize = 0
 
 // pgzipPools holds bounded pools for different concurrency levels.
 // This allows reuse of gzip writers when the same concurrency is used repeatedly,

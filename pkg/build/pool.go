@@ -19,7 +19,10 @@
 package build
 
 import (
+	"strings"
+
 	"chainguard.dev/apko/internal/pool"
+	"chainguard.dev/apko/pkg/options"
 )
 
 // BoundedPool is a sync.Pool with a configurable maximum size.
@@ -59,4 +62,57 @@ func ClearPools() {
 // ResetPoolMetrics resets the hit/miss/drop counters for all registered pools.
 func ResetPoolMetrics() {
 	pool.ResetAllMetrics()
+}
+
+// ConfigurePoolsFromOptions configures all registered pool sizes based on the provided options.
+// This should be called early in service initialization, before any builds start.
+// Pool sizes of 0 mean uncapped (standard sync.Pool behavior).
+//
+// Example usage for apko-as-a-service:
+//
+//	opts := &options.Options{
+//	    GzipPoolSize:      options.RecommendedGzipPoolSize,      // 10
+//	    BufioPoolSize:     options.RecommendedBufioPoolSize,     // 20
+//	    ExpandAPKPoolSize: options.RecommendedExpandAPKPoolSize, // 20
+//	    TarFSPoolSize:     options.RecommendedTarFSPoolSize,     // 20
+//	}
+//	build.ConfigurePoolsFromOptions(opts)
+func ConfigurePoolsFromOptions(opts *options.Options) {
+	if opts == nil {
+		return
+	}
+
+	allStats := pool.AllStats()
+	for name := range allStats {
+		p, ok := pool.GetPool(name)
+		if !ok {
+			continue
+		}
+
+		var size int
+		switch {
+		case strings.HasPrefix(name, "pgzip-"):
+			size = opts.GzipPoolSize
+		case name == "bufio-writer":
+			size = opts.BufioPoolSize
+		case strings.HasPrefix(name, "expandapk-"):
+			size = opts.ExpandAPKPoolSize
+		case name == "tarfs-reader":
+			size = opts.TarFSPoolSize
+		}
+
+		p.SetMaxSize(size)
+	}
+}
+
+// ConfigurePoolsForService is a convenience function that configures all pools
+// with the recommended sizes for running apko as a service with many parallel builds.
+// This is equivalent to calling ConfigurePoolsFromOptions with all Recommended* values.
+func ConfigurePoolsForService() {
+	ConfigurePoolsFromOptions(&options.Options{
+		GzipPoolSize:      options.RecommendedGzipPoolSize,
+		BufioPoolSize:     options.RecommendedBufioPoolSize,
+		ExpandAPKPoolSize: options.RecommendedExpandAPKPoolSize,
+		TarFSPoolSize:     options.RecommendedTarFSPoolSize,
+	})
 }

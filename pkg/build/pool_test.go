@@ -17,6 +17,8 @@ package build
 import (
 	"sync"
 	"testing"
+
+	"chainguard.dev/apko/pkg/options"
 )
 
 // TestBoundedPool_PublicAPI tests the public API re-exported from internal/pool.
@@ -118,6 +120,56 @@ func TestClearPools(t *testing.T) {
 	stats = pool.Stats()
 	if stats.Count != 0 {
 		t.Errorf("expected count 0 after clear, got %d", stats.Count)
+	}
+}
+
+func TestConfigurePoolsFromOptions(t *testing.T) {
+	// Create test pools with initial size 0 (uncapped)
+	testPool1 := NewBoundedPool(0, func() any { return 1 })
+	testPool2 := NewBoundedPool(0, func() any { return 2 })
+	RegisterPool("expandapk-test-config", testPool1)
+	RegisterPool("tarfs-reader", testPool2)
+
+	// Verify initial state is uncapped
+	stats1 := testPool1.Stats()
+	stats2 := testPool2.Stats()
+	if stats1.MaxSize != 0 {
+		t.Errorf("expected initial maxSize 0, got %d", stats1.MaxSize)
+	}
+	if stats2.MaxSize != 0 {
+		t.Errorf("expected initial maxSize 0, got %d", stats2.MaxSize)
+	}
+
+	// Configure pools
+	opts := &options.Options{
+		ExpandAPKPoolSize: 15,
+		TarFSPoolSize:     25,
+	}
+	ConfigurePoolsFromOptions(opts)
+
+	// Verify pools were configured
+	stats1 = testPool1.Stats()
+	stats2 = testPool2.Stats()
+	if stats1.MaxSize != 15 {
+		t.Errorf("expected maxSize 15, got %d", stats1.MaxSize)
+	}
+	if stats2.MaxSize != 25 {
+		t.Errorf("expected maxSize 25, got %d", stats2.MaxSize)
+	}
+}
+
+func TestConfigurePoolsForService(t *testing.T) {
+	// Create a test pool
+	testPool := NewBoundedPool(0, func() any { return 1 })
+	RegisterPool("expandapk-service-test", testPool)
+
+	// Configure for service
+	ConfigurePoolsForService()
+
+	// Verify pool was configured with recommended size
+	stats := testPool.Stats()
+	if stats.MaxSize != int64(options.RecommendedExpandAPKPoolSize) {
+		t.Errorf("expected maxSize %d, got %d", options.RecommendedExpandAPKPoolSize, stats.MaxSize)
 	}
 }
 
