@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -46,9 +47,50 @@ import (
 	"chainguard.dev/apko/pkg/s6"
 )
 
-// compressionCache stores descriptor information for already-compressed layers,
+// compressionCacheEntry stores information about a compressed layer.
+type compressionCacheEntry struct {
+	Descriptor     *v1.Descriptor
+	CompressedPath string // Path to the compressed file, if it still exists
+}
+
+// compressionCache stores descriptor and path information for already-compressed layers,
 // keyed by diffID. This avoids recompressing identical layers.
-var compressionCache sync.Map // map[string]*v1.Descriptor
+var compressionCache sync.Map // map[string]*compressionCacheEntry
+
+// CompressionCacheStats tracks cache hit/miss statistics.
+type CompressionCacheStats struct {
+	Hits      int64 // Layers found in cache with valid compressed file
+	Misses    int64 // Layers not in cache or file missing
+	Evictions int64 // Cache entries whose files were missing
+}
+
+var compressionCacheStats struct {
+	hits      atomic.Int64
+	misses    atomic.Int64
+	evictions atomic.Int64
+}
+
+// GetCompressionCacheStats returns the current compression cache statistics.
+func GetCompressionCacheStats() CompressionCacheStats {
+	return CompressionCacheStats{
+		Hits:      compressionCacheStats.hits.Load(),
+		Misses:    compressionCacheStats.misses.Load(),
+		Evictions: compressionCacheStats.evictions.Load(),
+	}
+}
+
+// ResetCompressionCacheStats resets the compression cache statistics.
+func ResetCompressionCacheStats() {
+	compressionCacheStats.hits.Store(0)
+	compressionCacheStats.misses.Store(0)
+	compressionCacheStats.evictions.Store(0)
+}
+
+// ClearCompressionCache clears the compression cache.
+// This is useful for long-running services to free memory.
+func ClearCompressionCache() {
+	compressionCache = sync.Map{}
+}
 
 // Context contains all of the information necessary to build an
 // OCI image. Includes the configuration for the build,
@@ -375,6 +417,25 @@ func (l *layer) compress() error {
 		return nil
 	}
 
+	// Check if we have a cached compressed file we can reuse
+	if cached, ok := compressionCache.Load(l.diffid.String()); ok {
+		entry := cached.(*compressionCacheEntry)
+		if entry.CompressedPath != "" {
+			// Verify the file still exists
+			if _, err := os.Stat(entry.CompressedPath); err == nil {
+				l.compressed = entry.CompressedPath
+				l.desc.Digest = entry.Descriptor.Digest
+				l.desc.Size = entry.Descriptor.Size
+				compressionCacheStats.hits.Add(1)
+				return nil
+			}
+			// File is gone, will need to recompress
+			compressionCacheStats.evictions.Add(1)
+		}
+	}
+
+	compressionCacheStats.misses.Add(1)
+
 	in, err := l.Uncompressed()
 	if err != nil {
 		return err
@@ -417,12 +478,14 @@ func (l *layer) compress() error {
 
 	l.desc.Digest = h
 	l.desc.Size = stat.Size()
-
-	// Store in cache for future use
-	descCopy := *l.desc
-	compressionCache.Store(l.diffid.String(), &descCopy)
-
 	l.compressed = l.uncompressed + ".gz"
+
+	// Store in cache for future use, including the compressed file path
+	descCopy := *l.desc
+	compressionCache.Store(l.diffid.String(), &compressionCacheEntry{
+		Descriptor:     &descCopy,
+		CompressedPath: l.compressed,
+	})
 
 	return out.Close()
 }
@@ -434,9 +497,9 @@ func (l *layer) DiffID() (v1.Hash, error) {
 func (l *layer) Digest() (v1.Hash, error) {
 	// Check if we've already compressed a layer with this diffID
 	if cached, ok := compressionCache.Load(l.diffid.String()); ok {
-		cachedDesc := cached.(*v1.Descriptor)
-		l.desc.Digest = cachedDesc.Digest
-		l.desc.Size = cachedDesc.Size
+		entry := cached.(*compressionCacheEntry)
+		l.desc.Digest = entry.Descriptor.Digest
+		l.desc.Size = entry.Descriptor.Size
 		return l.desc.Digest, nil
 	}
 
@@ -467,9 +530,9 @@ func (l *layer) Uncompressed() (io.ReadCloser, error) {
 func (l *layer) Size() (int64, error) {
 	// Check if we've already compressed a layer with this diffID
 	if cached, ok := compressionCache.Load(l.diffid.String()); ok {
-		cachedDesc := cached.(*v1.Descriptor)
-		l.desc.Digest = cachedDesc.Digest
-		l.desc.Size = cachedDesc.Size
+		entry := cached.(*compressionCacheEntry)
+		l.desc.Digest = entry.Descriptor.Digest
+		l.desc.Size = entry.Descriptor.Size
 		return l.desc.Size, nil
 	}
 

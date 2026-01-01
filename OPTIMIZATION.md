@@ -380,79 +380,47 @@ build.ResetPoolMetrics()
 
 ### Low Hanging Fruit
 
-#### 4. Layer Compression Cache Enhancement
+#### 4. Layer Compression Cache Enhancement - IMPLEMENTED
+
+**Status**: Implemented in this commit.
 
 **Problem**: Identical layers get compressed multiple times across builds.
 
-**Current Cache** (`pkg/build/build.go:49-51`):
+**Original Cache**:
+- Stored only descriptor (digest, size) keyed by diffID
+- Avoided recomputing digest for same diffID
+- But still recompressed every time `Compressed()` was called
+
+**Enhanced Cache**:
+- Stores both descriptor AND compressed file path
+- When a layer with the same diffID needs compression, reuses the existing compressed file
+- Falls back to recompression if the cached file is deleted (eviction)
+- Tracks cache statistics (hits, misses, evictions)
+
+**Key Files Modified**:
+- `pkg/build/build.go` - Enhanced `compressionCacheEntry`, added stats tracking
+- `pkg/build/layer_cache_test.go` - Updated tests for new behavior
+
+**Usage**:
 ```go
-var compressionCache sync.Map // map[diffID]*v1.Descriptor
+import "chainguard.dev/apko/pkg/build"
+
+// Get compression cache statistics
+stats := build.GetCompressionCacheStats()
+log.Printf("Compression cache: hits=%d misses=%d evictions=%d",
+    stats.Hits, stats.Misses, stats.Evictions)
+
+// Reset statistics for new monitoring period
+build.ResetCompressionCacheStats()
+
+// Clear the cache (for long-running services)
+build.ClearCompressionCache()
 ```
 
-This caches the *result* of compression (descriptor), but still:
-1. Writes uncompressed tar
-2. Compresses to get digest
-3. Only then checks if layer exists in registry
-
-**Proposed Enhancement**: Skip compression entirely when possible.
-
-**Key Insight**: go-containerregistry's `remote.Write` does a HEAD request before calling `Compressed()`. If the layer already exists, we can skip compression.
-
-```go
-// pkg/build/build.go
-
-type layer struct {
-    mu           sync.Mutex
-    uncompressed string
-    compressed   string
-    diffid       *v1.Hash
-    desc         *v1.Descriptor
-
-    // NEW: Track if we can skip compression
-    skipCompress bool
-    existsInRegistry func() bool  // Injected check function
-}
-
-func (l *layer) Digest() (v1.Hash, error) {
-    // First check compression cache
-    if cached, ok := compressionCache.Load(l.diffid.String()); ok {
-        cachedDesc := cached.(*v1.Descriptor)
-        l.desc.Digest = cachedDesc.Digest
-        l.desc.Size = cachedDesc.Size
-
-        // If we have a registry check function, verify layer exists
-        if l.existsInRegistry != nil && l.existsInRegistry() {
-            l.skipCompress = true
-        }
-        return l.desc.Digest, nil
-    }
-
-    // Fall back to compression
-    return l.compressAndCache()
-}
-
-func (l *layer) Compressed() (io.ReadCloser, error) {
-    if l.skipCompress {
-        // Return a reader that signals "already exists"
-        // go-containerregistry handles this gracefully
-        return nil, ErrLayerExists
-    }
-
-    if err := l.compress(); err != nil {
-        return nil, err
-    }
-    return os.Open(l.compressed)
-}
-```
-
-**Integration with ggcr**: The `remote.Write` function checks for existing layers:
-```go
-// In your publish code
-img, err := bc.BuildImage(ctx)
-// ...
-err = remote.Write(ref, img, remote.WithContext(ctx))
-// ggcr will HEAD each layer before calling Compressed()
-```
+**Impact**:
+- **Before**: Each layer instance with same diffID recompressed independently
+- **After**: First compression cached, subsequent layers reuse the compressed file
+- **Savings**: For 12 parallel builds with ~50% package overlap, ~50% fewer compressions
 
 ---
 

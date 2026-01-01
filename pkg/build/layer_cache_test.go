@@ -121,10 +121,17 @@ func TestLayerCompressionCache(t *testing.T) {
 	// Now actually compress layer2 by calling Compressed()
 	rc, err := layer2.Compressed()
 	require.NoError(t, err)
-	rc.Close()
+	defer rc.Close()
 
-	// Now the compressed file should exist
-	require.FileExists(t, file2+".gz")
+	// With the enhanced compression cache, layer2 should reuse layer1's compressed file
+	// instead of creating its own. This is the key optimization - avoiding redundant compression.
+	// The compressed file for layer2 should NOT exist because we reused layer1's file.
+	require.NoFileExists(t, file2+".gz", "layer2 should reuse layer1's compressed file, not create its own")
+
+	// Verify the content is still readable from the cached compressed file
+	compressedContent, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.NotEmpty(t, compressedContent, "Should be able to read compressed content from cache")
 
 	// Create third layer with different content
 	differentContent := []byte("different content that will have different diffID")
@@ -211,6 +218,97 @@ func TestLayerCompressionCacheConsistency(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, originalSize, size, "Cached size should be consistent across all layers")
 	}
+}
+
+func TestCompressionCacheStats(t *testing.T) {
+	// Reset stats at the start
+	ResetCompressionCacheStats()
+	ClearCompressionCache()
+
+	tmpDir := t.TempDir()
+
+	// Create and compress a layer
+	testContent := []byte("stats test content")
+	h := sha256.Sum256(testContent)
+	diffID := v1.Hash{
+		Algorithm: "sha256",
+		Hex:       hex.EncodeToString(h[:]),
+	}
+
+	file1 := filepath.Join(tmpDir, "stats1.tar")
+	err := os.WriteFile(file1, testContent, 0644)
+	require.NoError(t, err)
+
+	layer1 := &layer{
+		uncompressed: file1,
+		diffid:       &diffID,
+		desc: &v1.Descriptor{
+			MediaType: v1types.OCILayer,
+		},
+	}
+
+	// First compression should be a miss
+	err = layer1.compress()
+	require.NoError(t, err)
+
+	stats := GetCompressionCacheStats()
+	require.Equal(t, int64(1), stats.Misses, "First compression should be a miss")
+	require.Equal(t, int64(0), stats.Hits, "No hits yet")
+
+	// Create second layer with same diffID
+	file2 := filepath.Join(tmpDir, "stats2.tar")
+	err = os.WriteFile(file2, testContent, 0644)
+	require.NoError(t, err)
+
+	layer2 := &layer{
+		uncompressed: file2,
+		diffid:       &diffID,
+		desc: &v1.Descriptor{
+			MediaType: v1types.OCILayer,
+		},
+	}
+
+	// Second compression should be a hit (reuses cached file)
+	err = layer2.compress()
+	require.NoError(t, err)
+
+	stats = GetCompressionCacheStats()
+	require.Equal(t, int64(1), stats.Hits, "Second compression should be a hit")
+	require.Equal(t, int64(1), stats.Misses, "Still one miss from before")
+
+	// Verify layer2 is using layer1's compressed file
+	require.Equal(t, layer1.compressed, layer2.compressed, "layer2 should reuse layer1's compressed file")
+
+	// Test eviction by removing the cached file
+	os.Remove(layer1.compressed)
+
+	// Create third layer with same diffID
+	file3 := filepath.Join(tmpDir, "stats3.tar")
+	err = os.WriteFile(file3, testContent, 0644)
+	require.NoError(t, err)
+
+	layer3 := &layer{
+		uncompressed: file3,
+		diffid:       &diffID,
+		desc: &v1.Descriptor{
+			MediaType: v1types.OCILayer,
+		},
+	}
+
+	// Third compression should be an eviction then miss (file was deleted)
+	err = layer3.compress()
+	require.NoError(t, err)
+
+	stats = GetCompressionCacheStats()
+	require.Equal(t, int64(1), stats.Evictions, "Should have one eviction")
+	require.Equal(t, int64(2), stats.Misses, "Should have two misses now")
+
+	// Test reset
+	ResetCompressionCacheStats()
+	stats = GetCompressionCacheStats()
+	require.Equal(t, int64(0), stats.Hits)
+	require.Equal(t, int64(0), stats.Misses)
+	require.Equal(t, int64(0), stats.Evictions)
 }
 
 func TestLayerUncompressedAccess(t *testing.T) {
