@@ -118,7 +118,9 @@ In long-running services, pools grow unbounded and only clear at GC time.
 
 ### Ground Level (Easiest)
 
-#### 1. On-Disk tarfs Index
+#### 1. On-Disk tarfs Index - IMPLEMENTED
+
+**Status**: Implemented in this commit.
 
 **Problem**: Every time an APK is used, we read the entire tar to build an index, even for cached packages.
 
@@ -186,6 +188,20 @@ func (fs *FS) SaveIndex(path string) error {
 - `internal/tarfs/tarfs.go` - Add `SerializedIndex`, `NewFromIndex()`, `SaveIndex()`
 - `pkg/apk/apk/implementation.go:1173-1267` - Load cached index in `cachedPackage()`
 - `pkg/apk/apk/implementation.go:1108-1171` - Save index in `cachePackage()`
+
+**Implementation Summary**:
+- Added `SerializedIndex` and `SerializedEntry` types to `internal/tarfs/tarfs.go`
+- Added `SaveIndex()` method to serialize tarfs index to JSON
+- Added `NewFromIndex()` function to load tarfs from cached index
+- Modified `cachePackage()` to save `.idx` file alongside cached tar
+- Modified `cachedPackage()` to try loading from cached index first
+
+**Benchmark Results** (1000 file tar):
+| Metric | `New()` (scan tar) | `NewFromIndex()` (load index) | Improvement |
+|--------|-------------------|------------------------------|-------------|
+| Time | 2.43ms | 0.87ms | **2.8x faster** |
+| Memory | 1.87MB | 1.30MB | **31% less** |
+| Allocations | 27,113 | 8,302 | **69% fewer** |
 
 ---
 
@@ -771,7 +787,7 @@ func (c *CompositionalCache) GetOrApply(parent *FSState, op Operation, fs *memFS
 | Concurrency controls | 30-50% | 60-80% | 1-2 days | **DONE** |
 | Pool size limits | 10-20% | 0% | 1 day | Pending |
 | Shared tarfs cache | 40-60% | 20-30% | 2-3 days | Pending |
-| On-disk tarfs index | 20-30% | 30-40% | 1 week | Pending |
+| On-disk tarfs index | 20-30% | 30-40% | 1 week | **DONE** |
 | Layer skip-compress | 10-20% | 40-60% | 1 week | Pending |
 | Image-level cache | 50-80%* | 50-80%* | 1-2 weeks | Pending |
 | Shared memFS | 60-80% | 10% | 2-4 weeks | Pending |

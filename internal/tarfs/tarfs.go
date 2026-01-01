@@ -18,10 +18,12 @@ import (
 	"archive/tar"
 	"bufio"
 	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path"
 	"slices"
 	"sync"
@@ -273,4 +275,136 @@ func (fsys *FS) Close() error {
 	}
 
 	return closer.Close()
+}
+
+// SerializedIndex is a disk-serializable representation of a tarfs index.
+// This allows skipping the full tar scan when loading cached packages.
+type SerializedIndex struct {
+	Files []SerializedEntry `json:"files"`
+}
+
+// SerializedEntry represents a single tar entry in serialized form.
+type SerializedEntry struct {
+	Name     string      `json:"n"`
+	Offset   int64       `json:"o"`
+	Size     int64       `json:"s"`
+	Mode     int64       `json:"m"`
+	Typeflag byte        `json:"t"`
+	Linkname string      `json:"l,omitempty"`
+	ModTime  int64       `json:"mt,omitempty"` // Unix timestamp
+	Uid      int         `json:"u,omitempty"`
+	Gid      int         `json:"g,omitempty"`
+	Uname    string      `json:"un,omitempty"`
+	Gname    string      `json:"gn,omitempty"`
+	Devmajor int64       `json:"dmj,omitempty"`
+	Devminor int64       `json:"dmn,omitempty"`
+	PAXRecords map[string]string `json:"pax,omitempty"`
+}
+
+// SaveIndex serializes the tarfs index to a file for later fast loading.
+func (fsys *FS) SaveIndex(indexPath string) error {
+	idx := SerializedIndex{
+		Files: make([]SerializedEntry, len(fsys.files)),
+	}
+
+	for i, e := range fsys.files {
+		idx.Files[i] = SerializedEntry{
+			Name:     e.Header.Name,
+			Offset:   e.Offset,
+			Size:     e.Header.Size,
+			Mode:     int64(e.Header.Mode),
+			Typeflag: e.Header.Typeflag,
+			Linkname: e.Header.Linkname,
+			ModTime:  e.Header.ModTime.Unix(),
+			Uid:      e.Header.Uid,
+			Gid:      e.Header.Gid,
+			Uname:    e.Header.Uname,
+			Gname:    e.Header.Gname,
+			Devmajor: e.Header.Devmajor,
+			Devminor: e.Header.Devminor,
+			PAXRecords: e.Header.PAXRecords,
+		}
+	}
+
+	data, err := json.Marshal(idx)
+	if err != nil {
+		return fmt.Errorf("marshaling index: %w", err)
+	}
+
+	return os.WriteFile(indexPath, data, 0644)
+}
+
+// NewFromIndex loads a tarfs from a cached index file, avoiding the full tar scan.
+// This is significantly faster than New() for cached packages.
+func NewFromIndex(ra io.ReaderAt, indexPath string) (*FS, error) {
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var idx SerializedIndex
+	if err := json.Unmarshal(data, &idx); err != nil {
+		return nil, fmt.Errorf("unmarshaling index: %w", err)
+	}
+
+	return rebuildFromIndex(ra, &idx)
+}
+
+// rebuildFromIndex reconstructs the FS structure from a serialized index.
+func rebuildFromIndex(ra io.ReaderAt, idx *SerializedIndex) (*FS, error) {
+	fsys := &FS{
+		ra:    ra,
+		files: make([]*Entry, len(idx.Files)),
+		index: make(map[string]int, len(idx.Files)),
+		dirs:  map[string][]fs.DirEntry{},
+	}
+
+	// Number of entries in a given directory, so we know how large of a slice to allocate.
+	dirCount := map[string]int{}
+
+	for i, se := range idx.Files {
+		hdr := tar.Header{
+			Name:     se.Name,
+			Size:     se.Size,
+			Mode:     se.Mode,
+			Typeflag: se.Typeflag,
+			Linkname: se.Linkname,
+			ModTime:  time.Unix(se.ModTime, 0),
+			Uid:      se.Uid,
+			Gid:      se.Gid,
+			Uname:    se.Uname,
+			Gname:    se.Gname,
+			Devmajor: se.Devmajor,
+			Devminor: se.Devminor,
+			PAXRecords: se.PAXRecords,
+		}
+
+		dir := path.Dir(hdr.Name)
+		fsys.index[hdr.Name] = i
+		fsys.files[i] = &Entry{
+			Header: hdr,
+			Offset: se.Offset,
+			dir:    dir,
+			fi:     hdr.FileInfo(),
+		}
+
+		dirCount[dir]++
+	}
+
+	// Pre-generate the results of ReadDir so we don't allocate a ton if fs.WalkDir calls us.
+	for dir, count := range dirCount {
+		fsys.dirs[dir] = make([]fs.DirEntry, 0, count)
+	}
+
+	for _, f := range fsys.files {
+		fsys.dirs[f.dir] = append(fsys.dirs[f.dir], f)
+	}
+
+	for _, files := range fsys.dirs {
+		slices.SortFunc(files, func(a, b fs.DirEntry) int {
+			return cmp.Compare(a.Name(), b.Name())
+		})
+	}
+
+	return fsys, nil
 }
