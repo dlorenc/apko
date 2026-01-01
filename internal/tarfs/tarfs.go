@@ -26,14 +26,22 @@ import (
 	"os"
 	"path"
 	"slices"
-	"sync"
 	"time"
+
+	"chainguard.dev/apko/internal/pool"
 )
 
-var readerPool = sync.Pool{
-	New: func() any {
-		return bufio.NewReaderSize(nil, 1<<20)
-	},
+// DefaultTarFSPoolSize is the maximum number of items to retain in the pool.
+// Each reader is 1MB, so 20 items = 20MB max.
+const DefaultTarFSPoolSize = 20
+
+// readerPool is a bounded pool of 1MB bufio readers.
+var readerPool = pool.NewBoundedPool(DefaultTarFSPoolSize, func() any {
+	return bufio.NewReaderSize(nil, 1<<20)
+})
+
+func init() {
+	pool.Register("tarfs-reader", readerPool)
 }
 
 func pooledBufioReader(r io.Reader) *bufio.Reader {

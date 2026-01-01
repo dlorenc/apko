@@ -22,26 +22,37 @@ import (
 	"strings"
 	"sync"
 
+	"chainguard.dev/apko/internal/pool"
 	"chainguard.dev/apko/internal/tarfs"
 	"github.com/klauspost/compress/gzip"
 
 	"go.opentelemetry.io/otel"
 )
 
-var slicePool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 1<<20)
-	},
+// DefaultExpandAPKPoolSize is the maximum number of items to retain in each pool.
+// Each buffer is 1MB, so 20 items = 20MB max per pool.
+const DefaultExpandAPKPoolSize = 20
+
+// slicePool is a bounded pool of 1MB byte slices for I/O operations.
+var slicePool = pool.NewBoundedPool(DefaultExpandAPKPoolSize, func() any {
+	return make([]byte, 1<<20)
+})
+
+func init() {
+	pool.Register("expandapk-slice", slicePool)
 }
 
 func pooledSlice() []byte {
 	return slicePool.Get().([]byte)
 }
 
-var readerPool = sync.Pool{
-	New: func() interface{} {
-		return bufio.NewReaderSize(nil, 1<<20)
-	},
+// readerPool is a bounded pool of 1MB bufio readers.
+var readerPool = pool.NewBoundedPool(DefaultExpandAPKPoolSize, func() any {
+	return bufio.NewReaderSize(nil, 1<<20)
+})
+
+func init() {
+	pool.Register("expandapk-reader", readerPool)
 }
 
 func pooledBufioReader(r io.Reader) *bufio.Reader {
@@ -50,10 +61,13 @@ func pooledBufioReader(r io.Reader) *bufio.Reader {
 	return br
 }
 
-var writerPool = sync.Pool{
-	New: func() interface{} {
-		return bufio.NewWriterSize(nil, 1<<20)
-	},
+// writerPool is a bounded pool of 1MB bufio writers.
+var writerPool = pool.NewBoundedPool(DefaultExpandAPKPoolSize, func() any {
+	return bufio.NewWriterSize(nil, 1<<20)
+})
+
+func init() {
+	pool.Register("expandapk-writer", writerPool)
 }
 
 func pooledBufioWriter(w io.Writer) *bufio.Writer {

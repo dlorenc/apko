@@ -54,31 +54,43 @@ import (
 // override this default on a per-build basis.
 var defaultGzipThreads = min(runtime.GOMAXPROCS(0), 8)
 
-// pgzipPools holds pools for different concurrency levels.
-// This allows reuse of gzip writers when the same concurrency is used repeatedly.
-var pgzipPools sync.Map // map[int]*sync.Pool
+// DefaultBufioPoolSize is the default maximum number of bufio writers to retain in the pool.
+// Each writer is 4MB, so 20 writers = 80MB max memory for bufio pool.
+const DefaultBufioPoolSize = 20
 
-// getGzipPool returns a sync.Pool for gzip writers with the given concurrency.
-func getGzipPool(concurrency int) *sync.Pool {
+// DefaultGzipPoolSize is the default maximum number of gzip writers to retain per concurrency level.
+// Each writer is ~8MB (1MB blocks × 8 threads at default), so 10 writers = 80MB max per concurrency level.
+const DefaultGzipPoolSize = 10
+
+// pgzipPools holds bounded pools for different concurrency levels.
+// This allows reuse of gzip writers when the same concurrency is used repeatedly,
+// while preventing unbounded memory growth in long-running services.
+var pgzipPools sync.Map // map[int]*BoundedPool
+
+// getGzipPool returns a BoundedPool for gzip writers with the given concurrency.
+func getGzipPool(concurrency int) *BoundedPool {
 	if pool, ok := pgzipPools.Load(concurrency); ok {
-		return pool.(*sync.Pool)
+		return pool.(*BoundedPool)
 	}
 
-	newPool := &sync.Pool{
-		New: func() any {
-			zw := gzip.NewWriter(nil)
-			if err := zw.SetConcurrency(1<<20, concurrency); err != nil {
-				// This should never happen.
-				panic(fmt.Errorf("tried to set pgzip concurrency to %d: %w", concurrency, err))
-			}
-			return zw
-		},
-	}
+	newPool := NewBoundedPool(DefaultGzipPoolSize, func() any {
+		zw := gzip.NewWriter(nil)
+		if err := zw.SetConcurrency(1<<20, concurrency); err != nil {
+			// This should never happen.
+			panic(fmt.Errorf("tried to set pgzip concurrency to %d: %w", concurrency, err))
+		}
+		return zw
+	})
 
 	// Store and return; if another goroutine stored first, that's fine - we'll just
 	// have two pools briefly, and one will be GC'd.
 	actual, _ := pgzipPools.LoadOrStore(concurrency, newPool)
-	return actual.(*sync.Pool)
+	result := actual.(*BoundedPool)
+
+	// Register the pool so it can be cleared via ClearPools()
+	RegisterPool(fmt.Sprintf("pgzip-concurrency-%d", concurrency), result)
+
+	return result
 }
 
 // newGzipWriter creates a gzip writer with the specified concurrency.
@@ -103,10 +115,14 @@ func putGzipWriter(zw *gzip.Writer, concurrency int) {
 	pool.Put(zw)
 }
 
-var bufioPool = sync.Pool{
-	New: func() any {
-		return bufio.NewWriterSize(nil, 1<<22)
-	},
+// bufioPool is a bounded pool of bufio.Writers (4MB each).
+// The pool is bounded to prevent unbounded memory growth in long-running services.
+var bufioPool = NewBoundedPool(DefaultBufioPoolSize, func() any {
+	return bufio.NewWriterSize(nil, 1<<22)
+})
+
+func init() {
+	RegisterPool("bufio-writer", bufioPool)
 }
 
 func pooledBufioWriter(w io.Writer) *bufio.Writer {

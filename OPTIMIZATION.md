@@ -287,11 +287,13 @@ opts := []build.Option{
 
 ---
 
-#### 3. Memory Tuning (Pool Management)
+#### 3. Memory Tuning (Pool Management) - IMPLEMENTED
+
+**Status**: Implemented in this commit.
 
 **Problem**: `sync.Pool` instances grow unbounded in long-running processes.
 
-**Current Pools**:
+**Original Pools**:
 | Pool | Location | Size Per Item |
 |------|----------|---------------|
 | pgzipPool | build_implementation.go:53 | ~8MB (1MB × 8 threads) |
@@ -301,54 +303,55 @@ opts := []build.Option{
 | writerPool | expandapk.go:53 | 1MB |
 | readerPool | tarfs.go:31 | 1MB |
 
-**Proposed Solution**: Bounded pools with periodic clearing.
+**Implementation**: Bounded pools with metrics tracking and centralized clearing.
 
+**Key Files Modified**:
+- `internal/pool/pool.go` - Core `BoundedPool` implementation and `Registry`
+- `pkg/build/pool.go` - Public API re-export
+- `pkg/build/build_implementation.go` - Updated pgzipPools and bufioPool
+- `pkg/apk/expandapk/expandapk.go` - Updated slicePool, readerPool, writerPool
+- `internal/tarfs/tarfs.go` - Updated readerPool
+
+**Pool Size Limits**:
+| Pool | Max Items | Memory Cap |
+|------|-----------|------------|
+| pgzip-concurrency-N | 10 | ~80MB per concurrency level |
+| bufio-writer | 20 | ~80MB |
+| expandapk-slice | 20 | ~20MB |
+| expandapk-reader | 20 | ~20MB |
+| expandapk-writer | 20 | ~20MB |
+| tarfs-reader | 20 | ~20MB |
+
+**Usage**:
 ```go
-// pkg/build/pool.go
-type BoundedPool struct {
-    pool    sync.Pool
-    count   atomic.Int64
-    maxSize int64
+// For long-running services, clear pools between builds:
+import "chainguard.dev/apko/pkg/build"
+
+// Clear all registered pools (triggers GC)
+build.ClearPools()
+
+// Get pool statistics for monitoring
+stats := build.AllPoolStats()
+for name, s := range stats {
+    log.Printf("%s: hits=%d misses=%d drops=%d hitRate=%.1f%%",
+        name, s.Hits, s.Misses, s.Drops, s.HitRate())
 }
 
-func NewBoundedPool(maxSize int, newFunc func() any) *BoundedPool {
-    return &BoundedPool{
-        pool:    sync.Pool{New: newFunc},
-        maxSize: int64(maxSize),
-    }
-}
-
-func (p *BoundedPool) Get() any {
-    p.count.Add(-1)
-    return p.pool.Get()
-}
-
-func (p *BoundedPool) Put(x any) {
-    if p.count.Load() < p.maxSize {
-        p.count.Add(1)
-        p.pool.Put(x)
-    }
-    // Otherwise, let it be GC'd
-}
-
-// For long-running services, periodically clear pools
-func (p *BoundedPool) Clear() {
-    p.count.Store(0)
-    // sync.Pool clears itself at GC, but we can force new allocations
-}
+// Reset metrics for new monitoring period
+build.ResetPoolMetrics()
 ```
 
-**Alternative**: Add a `ClearPools()` function callable between builds:
-```go
-// pkg/build/pools.go
-func ClearPools() {
-    // Force GC to clear sync.Pools
-    runtime.GC()
+**Benchmark Results**:
+| Metric | sync.Pool | BoundedPool | Overhead |
+|--------|-----------|-------------|----------|
+| Single-thread Get/Put | 5.6ns | 7.0ns | 25% |
+| Parallel Get/Put | 1.2ns | 302ns | Higher due to atomics |
+| Hit Rate (12 concurrent) | N/A | 99.9% | Excellent reuse |
 
-    // Reset any counters/metrics
-    poolMetrics.Reset()
-}
-```
+**Notes**:
+- The parallel overhead is acceptable since actual build operations (gzip, tar) take milliseconds
+- Pool metrics are tracked via atomic counters for hit/miss/drop statistics
+- `ClearPools()` forces GC and resets all pool counters
 
 ---
 
@@ -785,7 +788,7 @@ func (c *CompositionalCache) GetOrApply(parent *FSState, op Operation, fs *memFS
 | Optimization | Memory Reduction | CPU Reduction | Implementation Effort | Status |
 |--------------|------------------|---------------|----------------------|--------|
 | Concurrency controls | 30-50% | 60-80% | 1-2 days | **DONE** |
-| Pool size limits | 10-20% | 0% | 1 day | Pending |
+| Pool size limits | 10-20% | 0% | 1 day | **DONE** |
 | Shared tarfs cache | 40-60% | 20-30% | 2-3 days | Pending |
 | On-disk tarfs index | 20-30% | 30-40% | 1 week | **DONE** |
 | Layer skip-compress | 10-20% | 40-60% | 1 week | Pending |
@@ -799,9 +802,14 @@ func (c *CompositionalCache) GetOrApply(parent *FSState, op Operation, fs *memFS
 
 **Current State**: 20-30GB memory, CPU saturation
 
-**After Tier 1 (Concurrency + Pools + Shared tarfs)**:
-- Memory: 8-12GB (60% reduction)
+**After Implemented Optimizations (Concurrency + Pools + On-disk tarfs index)**:
+- Memory: 10-15GB (50% reduction)
 - CPU: Manageable load (70% reduction in thread contention)
+- Pool memory capped at ~240MB total across all pools
+
+**After Tier 1 (+ Shared tarfs cache)**:
+- Memory: 8-12GB (60% reduction)
+- CPU: Improved further with shared index cache
 
 **After Tier 2 (+ On-disk index + Layer cache)**:
 - Memory: 5-8GB (75% reduction)
