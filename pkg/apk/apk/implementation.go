@@ -1270,28 +1270,45 @@ func (a *APK) cachedPackage(ctx context.Context, pkg InstallablePackage, cacheDi
 	}
 
 	exp.TarFile = strings.TrimSuffix(exp.PackageFile, ".gz")
-	data, err := exp.PackageData()
-	if err != nil {
-		return nil, err
-	}
 
-	// Try to load from cached tarfs index for faster initialization.
-	// This avoids scanning the entire tar file to build the index.
-	idxPath := exp.TarFile + ".idx"
-	if exp.TarFS, err = tarfs.NewFromIndex(data, idxPath); err != nil {
+	// Use shared tarfs cache for cached packages.
+	// This allows multiple builds using the same package to share the same
+	// in-memory tarfs index, reducing memory and computation.
+	cache := expandapk.GlobalTarFSCache()
+	exp.TarFS, err = cache.GetOrCreate(exp.PackageHash, func() (*tarfs.FS, *os.File, string, error) {
+		data, err := exp.PackageData()
+		if err != nil {
+			return nil, nil, "", err
+		}
+
+		// Try to load from cached tarfs index for faster initialization.
+		// This avoids scanning the entire tar file to build the index.
+		idxPath := exp.TarFile + ".idx"
+		if tfs, err := tarfs.NewFromIndex(data, idxPath); err == nil {
+			return tfs, data, exp.TarFile, nil
+		}
+
 		// Index doesn't exist or is invalid, fall back to scanning the tar.
 		info, err := data.Stat()
 		if err != nil {
-			return nil, err
+			data.Close()
+			return nil, nil, "", err
 		}
-		exp.TarFS, err = tarfs.New(data, info.Size())
+		tfs, err := tarfs.New(data, info.Size())
 		if err != nil {
-			return nil, err
+			data.Close()
+			return nil, nil, "", err
 		}
+
 		// Save the index for next time.
-		if saveErr := exp.TarFS.SaveIndex(idxPath); saveErr != nil {
+		if saveErr := tfs.SaveIndex(idxPath); saveErr != nil {
 			clog.FromContext(ctx).Debugf("failed to save tarfs index for %s: %v", pkg.PackageName(), saveErr)
 		}
+
+		return tfs, data, exp.TarFile, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return &exp, nil

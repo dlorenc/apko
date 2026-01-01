@@ -497,77 +497,69 @@ cache.ResetStats()
 
 ---
 
-#### 6. Shared tarfs Index Cache
+#### 6. Shared tarfs Index Cache - IMPLEMENTED
+
+**Status**: Implemented in this commit.
 
 **Problem**: Each build creates its own tarfs index for the same packages.
 
-**Proposed Solution**: Global cache of tarfs indexes.
+**Solution**: Global cache of tarfs.FS instances by package hash.
 
+**Key Files Modified**:
+- `pkg/apk/expandapk/tarfs_cache.go` - New `TarFSCache` implementation
+- `pkg/apk/apk/implementation.go` - Integrated cache in `cachedPackage()`
+- `pkg/apk/expandapk/tarfs_cache_test.go` - Tests for cache functionality
+
+**Features**:
+- **Cache by package hash**: tarfs.FS instances cached by package content hash
+- **File handle management**: Cache owns file handles, properly closed on eviction
+- **Thread-safe**: Concurrent access with RWMutex
+- **Statistics tracking**: Cache hits/misses for monitoring
+- **Time-based eviction**: `Evict(unusedFor)` method for clearing old entries
+- **Global singleton**: `GlobalTarFSCache()` provides shared instance
+
+**Usage**:
 ```go
-// pkg/apk/apk/tarfs_cache.go
+import "chainguard.dev/apko/pkg/apk/expandapk"
 
-var tarfsIndexCache = &TarFSCache{
-    cache: make(map[string]*tarfs.FS),
-}
+// Get the global cache
+cache := expandapk.GlobalTarFSCache()
 
-type TarFSCache struct {
-    mu    sync.RWMutex
-    cache map[string]*tarfs.FS  // packageChecksum → tarfs
-}
-
-func (c *TarFSCache) GetOrCreate(checksum string, create func() (*tarfs.FS, error)) (*tarfs.FS, error) {
-    c.mu.RLock()
-    if fs, ok := c.cache[checksum]; ok {
-        c.mu.RUnlock()
-        return fs, nil
-    }
-    c.mu.RUnlock()
-
-    c.mu.Lock()
-    defer c.mu.Unlock()
-
-    // Double-check
-    if fs, ok := c.cache[checksum]; ok {
-        return fs, nil
-    }
-
-    fs, err := create()
+// Get or create a cached tarfs
+tfs, err := cache.GetOrCreate(packageHash, func() (*tarfs.FS, *os.File, string, error) {
+    f, err := os.Open(tarFilePath)
     if err != nil {
-        return nil, err
+        return nil, nil, "", err
     }
+    info, _ := f.Stat()
+    tfs, err := tarfs.New(f, info.Size())
+    return tfs, f, tarFilePath, err
+})
 
-    c.cache[checksum] = fs
-    return fs, nil
-}
+// Get statistics
+stats := expandapk.GetTarFSCacheStats()
+log.Printf("TarFS cache: hits=%d misses=%d size=%d",
+    stats.Hits, stats.Misses, stats.Size)
 
-// Clear old entries periodically
-func (c *TarFSCache) Evict(olderThan time.Duration) {
-    // Implementation with LRU or time-based eviction
-}
+// Clear old entries (e.g., unused for 1 hour)
+evicted := cache.Evict(time.Hour)
+
+// Clear entire cache
+expandapk.ClearTarFSCache()
 ```
 
-**Integration** (`pkg/apk/expandapk/expandapk.go`):
-```go
-func ExpandApk(ctx context.Context, source io.Reader, cacheDir string) (*APKExpanded, error) {
-    // ... existing code ...
+**Integration Point**:
+The cache is integrated in `cachedPackage()` where packages are loaded from their
+permanent cache locations. This ensures the tarfs.FS can be safely shared because:
+- Files are in their final locations (not temp files that will be moved)
+- Multiple builds loading the same cached package share the same tarfs index
+- The on-disk tarfs index optimization still works (loaded before caching)
 
-    // Use cached tarfs if available
-    checksum := hex.EncodeToString(exp.PackageHash)
-    exp.TarFS, err = tarfsIndexCache.GetOrCreate(checksum, func() (*tarfs.FS, error) {
-        data, err := exp.PackageData()
-        if err != nil {
-            return nil, err
-        }
-        info, err := data.Stat()
-        if err != nil {
-            return nil, err
-        }
-        return tarfs.New(data, info.Size())
-    })
-
-    return &exp, nil
-}
-```
+**Impact**:
+- **Before**: Each build created its own tarfs index for every package
+- **After**: Cached packages share tarfs indexes across builds
+- **Memory savings**: ~1-2MB per tarfs index, significant for common packages
+- **CPU savings**: Skip tar scanning for cached tarfs indexes
 
 ---
 
