@@ -83,6 +83,10 @@ type APK struct {
 	// This is a map of arch to apk.APK for every arch in a mult-arch situation.
 	// It's stuffed here to avoid plumbing it across every method, but it's optional.
 	ByArch map[string]*APK
+
+	// fetchWorkers controls the number of parallel goroutines for fetching/expanding APKs.
+	// If 0, uses GOMAXPROCS.
+	fetchWorkers int
 }
 
 func New(ctx context.Context, options ...Option) (*APK, error) {
@@ -115,7 +119,17 @@ func New(ctx context.Context, options ...Option) (*APK, error) {
 		noSignatureIndexes: opt.noSignatureIndexes,
 		installedFiles:     map[string]*Package{},
 		auth:               opt.auth,
+		fetchWorkers:       opt.fetchWorkers,
 	}, nil
+}
+
+// effectiveFetchWorkers returns the number of workers to use for fetching APKs.
+// If fetchWorkers is 0, returns GOMAXPROCS as the default.
+func (a *APK) effectiveFetchWorkers() int {
+	if a.fetchWorkers > 0 {
+		return a.fetchWorkers
+	}
+	return runtime.GOMAXPROCS(0)
 }
 
 type directory struct {
@@ -630,8 +644,7 @@ func (a *APK) ResolveWorld(ctx context.Context) (toInstall []*RepositoryPackage,
 }
 
 func (a *APK) CalculateWorld(ctx context.Context, allpkgs []*RepositoryPackage) ([]*APKResolved, error) {
-	// TODO: Consider making this configurable option.
-	jobs := runtime.GOMAXPROCS(0)
+	jobs := a.effectiveFetchWorkers()
 
 	var g errgroup.Group
 	g.SetLimit(jobs + 1)
@@ -738,8 +751,7 @@ type InstalledDiff struct {
 }
 
 func (a *APK) InstallPackages(ctx context.Context, sourceDateEpoch *time.Time, allpkgs []InstallablePackage) ([]InstalledDiff, error) {
-	// TODO: Consider making this configurable option.
-	jobs := runtime.GOMAXPROCS(0)
+	jobs := a.effectiveFetchWorkers()
 
 	var g errgroup.Group
 	g.SetLimit(jobs + 1)

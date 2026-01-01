@@ -37,6 +37,10 @@ type opts struct {
 	auth               auth.Authenticator
 	ignoreSignatures   bool
 	transport          http.RoundTripper
+
+	// Concurrency controls for running apko as a service with many parallel builds.
+	fetchWorkers   int // Number of parallel goroutines for fetching/expanding APKs
+	installWorkers int // Number of parallel goroutines for installing APKs (currently unused, reserved for future)
 }
 
 type Option func(*opts) error
@@ -140,6 +144,37 @@ func WithTransport(t http.RoundTripper) Option {
 		if t != nil {
 			o.transport = t
 		}
+		return nil
+	}
+}
+
+// WithFetchWorkers sets the number of parallel goroutines for fetching and expanding APK packages.
+// When set to 0 (default), uses GOMAXPROCS workers.
+//
+// Each APK fetch operation involves network I/O, decompression, and tarfs indexing.
+// For services running many parallel builds, set to 4-8 to limit concurrent operations
+// and prevent memory pressure from many simultaneous APK expansions.
+//
+// Example for a service building 12 images in parallel:
+//
+//	opts := []apk.Option{
+//	    apk.WithFetchWorkers(4),  // Limit parallel APK fetches
+//	}
+func WithFetchWorkers(workers int) Option {
+	return func(o *opts) error {
+		o.fetchWorkers = workers
+		return nil
+	}
+}
+
+// WithInstallWorkers sets the number of parallel goroutines for installing APK packages.
+// When set to 0 (default), uses GOMAXPROCS workers.
+//
+// Note: Currently APK installation is sequential due to filesystem ordering requirements.
+// This option is reserved for future optimizations.
+func WithInstallWorkers(workers int) Option {
+	return func(o *opts) error {
+		o.installWorkers = workers
 		return nil
 	}
 }

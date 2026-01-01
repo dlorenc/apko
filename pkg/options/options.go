@@ -57,6 +57,25 @@ type Options struct {
 	IncludePaths            []string           `json:"includePaths,omitempty"`
 	IgnoreSignatures        bool               `json:"ignoreSignatures,omitempty"`
 	Transport               http.RoundTripper  `json:"-"`
+
+	// Concurrency controls for running apko as a service with many parallel builds.
+	// These help prevent CPU and memory exhaustion when building multiple images concurrently.
+
+	// GzipConcurrency controls the number of parallel threads used by pgzip for layer compression.
+	// When set to 0 (default), uses min(GOMAXPROCS, 8) threads per compression operation.
+	// For services running many parallel builds, set to 1-2 to prevent thread explosion.
+	// Each gzip writer uses approximately (GzipConcurrency * 1MB) of memory for buffering.
+	GzipConcurrency int `json:"gzipConcurrency,omitempty"`
+
+	// APKFetchWorkers controls the number of parallel goroutines for fetching and expanding APK packages.
+	// When set to 0 (default), uses GOMAXPROCS workers.
+	// For services running many parallel builds, set to 4-8 to limit concurrent network/disk operations.
+	APKFetchWorkers int `json:"apkFetchWorkers,omitempty"`
+
+	// APKInstallWorkers controls the number of parallel goroutines for installing APK packages.
+	// When set to 0 (default), uses GOMAXPROCS workers.
+	// For memory-constrained environments, set to 1 for sequential installation.
+	APKInstallWorkers int `json:"apkInstallWorkers,omitempty"`
 }
 
 type Auth struct{ User, Pass string }
@@ -90,4 +109,31 @@ func (o Options) TarballFileName() string {
 		tarName = fmt.Sprintf("apko-%s.tar.gz", o.Arch.ToAPK())
 	}
 	return tarName
+}
+
+// EffectiveGzipConcurrency returns the gzip concurrency to use.
+// If GzipConcurrency is 0, returns min(GOMAXPROCS, 8) as the default.
+func (o Options) EffectiveGzipConcurrency() int {
+	if o.GzipConcurrency > 0 {
+		return o.GzipConcurrency
+	}
+	return min(runtime.GOMAXPROCS(0), 8)
+}
+
+// EffectiveAPKFetchWorkers returns the number of APK fetch workers to use.
+// If APKFetchWorkers is 0, returns GOMAXPROCS as the default.
+func (o Options) EffectiveAPKFetchWorkers() int {
+	if o.APKFetchWorkers > 0 {
+		return o.APKFetchWorkers
+	}
+	return runtime.GOMAXPROCS(0)
+}
+
+// EffectiveAPKInstallWorkers returns the number of APK install workers to use.
+// If APKInstallWorkers is 0, returns GOMAXPROCS as the default.
+func (o Options) EffectiveAPKInstallWorkers() int {
+	if o.APKInstallWorkers > 0 {
+		return o.APKInstallWorkers
+	}
+	return runtime.GOMAXPROCS(0)
 }

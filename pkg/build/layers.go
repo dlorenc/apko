@@ -85,7 +85,7 @@ func (bc *Context) buildLayers(ctx context.Context) ([]v1.Layer, error) {
 	}
 
 	// Then partition that single fs.FS into multiple layers based on our layering strategy.
-	return splitLayers(ctx, bc.fs, groups, pkgToDiff, bc.o.TempDir())
+	return splitLayers(ctx, bc.fs, groups, pkgToDiff, bc.o.TempDir(), bc.o.GzipConcurrency)
 }
 
 func replacesGroup(rep string, g *group) (bool, error) {
@@ -253,7 +253,7 @@ func merge(groups ...*group) *group {
 	return merged
 }
 
-func splitLayers(ctx context.Context, fsys apkfs.FullFS, groups []*group, pkgToDiff map[*apk.Package][]byte, tmpdir string) ([]v1.Layer, error) {
+func splitLayers(ctx context.Context, fsys apkfs.FullFS, groups []*group, pkgToDiff map[*apk.Package][]byte, tmpdir string, gzipConcurrency int) ([]v1.Layer, error) {
 	buf := make([]byte, 1<<20)
 
 	// We'll create a writer for each layer and a map to quickly access the writer given a package or group.
@@ -267,7 +267,7 @@ func splitLayers(ctx context.Context, fsys apkfs.FullFS, groups []*group, pkgToD
 		}
 		defer f.Close()
 
-		w := newLayerWriter(f)
+		w := newLayerWriter(f, gzipConcurrency)
 		groupToWriter[g] = w
 
 		for _, pkg := range g.pkgs {
@@ -282,7 +282,7 @@ func splitLayers(ctx context.Context, fsys apkfs.FullFS, groups []*group, pkgToD
 	}
 	defer f.Close()
 
-	top := newLayerWriter(f)
+	top := newLayerWriter(f, gzipConcurrency)
 
 	// In a tar file, it is customary to include directories before files in those directories.
 	// In order to know which directories we need to include, we maintain a directory stack for each layer.

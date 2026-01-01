@@ -280,7 +280,7 @@ func TestSplitLayersDirectoryCreation(t *testing.T) {
 
 	// Call splitLayers to create the layers
 	ctx := context.Background()
-	layers, err := splitLayers(ctx, fsys, groups, pkgToDiff, tmpDir)
+	layers, err := splitLayers(ctx, fsys, groups, pkgToDiff, tmpDir, 0) // 0 = use default gzip concurrency
 	if err != nil {
 		t.Fatalf("splitLayers failed: %v", err)
 	}

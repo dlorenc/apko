@@ -236,3 +236,90 @@ func WithTransport(t http.RoundTripper) Option {
 		return nil
 	}
 }
+
+// WithGzipConcurrency sets the number of parallel threads used by pgzip for layer compression.
+// When set to 0 (default), uses min(GOMAXPROCS, 8) threads per compression operation.
+//
+// For services running many parallel builds (e.g., apko-as-a-service), set to 1-2 to prevent
+// thread explosion. With 12 parallel builds using default settings, you could have up to
+// 12 * 8 = 96 concurrent gzip threads competing for CPU.
+//
+// Each gzip writer uses approximately (concurrency * 1MB) of memory for buffering,
+// so reducing this value also reduces memory consumption.
+//
+// Example for a service building 12 images in parallel:
+//
+//	opts := []build.Option{
+//	    build.WithGzipConcurrency(1),  // Single-threaded compression per layer
+//	}
+func WithGzipConcurrency(concurrency int) Option {
+	return func(bc *Context) error {
+		bc.o.GzipConcurrency = concurrency
+		return nil
+	}
+}
+
+// WithAPKFetchWorkers sets the number of parallel goroutines for fetching and expanding APK packages.
+// When set to 0 (default), uses GOMAXPROCS workers.
+//
+// Each APK fetch operation involves network I/O, decompression, and tarfs indexing.
+// For services running many parallel builds, set to 4-8 to limit concurrent operations
+// and prevent memory pressure from many simultaneous APK expansions.
+//
+// Example for a service building 12 images in parallel:
+//
+//	opts := []build.Option{
+//	    build.WithAPKFetchWorkers(4),  // Limit parallel APK fetches
+//	}
+func WithAPKFetchWorkers(workers int) Option {
+	return func(bc *Context) error {
+		bc.o.APKFetchWorkers = workers
+		return nil
+	}
+}
+
+// WithAPKInstallWorkers sets the number of parallel goroutines for installing APK packages.
+// When set to 0 (default), uses GOMAXPROCS workers.
+//
+// Package installation involves writing files to the in-memory filesystem.
+// For memory-constrained environments or when running many parallel builds,
+// set to 1 for sequential installation to reduce peak memory usage.
+//
+// Example for a memory-constrained service:
+//
+//	opts := []build.Option{
+//	    build.WithAPKInstallWorkers(1),  // Sequential package installation
+//	}
+func WithAPKInstallWorkers(workers int) Option {
+	return func(bc *Context) error {
+		bc.o.APKInstallWorkers = workers
+		return nil
+	}
+}
+
+// WithConcurrencyLimits is a convenience function that sets all concurrency controls at once.
+// This is useful for services that need to limit resource usage across all operations.
+//
+// Parameters:
+//   - gzipConcurrency: threads per gzip operation (0 = default min(GOMAXPROCS, 8))
+//   - apkFetchWorkers: parallel APK fetch goroutines (0 = default GOMAXPROCS)
+//   - apkInstallWorkers: parallel APK install goroutines (0 = default GOMAXPROCS)
+//
+// Example for apko-as-a-service running 12+ parallel builds:
+//
+//	opts := []build.Option{
+//	    build.WithConcurrencyLimits(1, 4, 1),  // Conservative limits
+//	}
+//
+// This would result in:
+//   - Single-threaded gzip compression (prevents 96+ gzip threads)
+//   - 4 parallel APK fetches (limits network/disk I/O)
+//   - Sequential package installation (reduces memory pressure)
+func WithConcurrencyLimits(gzipConcurrency, apkFetchWorkers, apkInstallWorkers int) Option {
+	return func(bc *Context) error {
+		bc.o.GzipConcurrency = gzipConcurrency
+		bc.o.APKFetchWorkers = apkFetchWorkers
+		bc.o.APKInstallWorkers = apkInstallWorkers
+		return nil
+	}
+}

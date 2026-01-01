@@ -187,7 +187,7 @@ func (bc *Context) ImageLayoutToLayer(ctx context.Context) (string, v1.Layer, er
 	bc.o.TarballPath = outfile.Name()
 	defer outfile.Close()
 
-	lw := newLayerWriter(outfile)
+	lw := newLayerWriter(outfile, bc.o.GzipConcurrency)
 
 	if err := writeTar(ctx, lw.w, bc.fs); err != nil {
 		return "", nil, fmt.Errorf("generating tarball: %w", err)
@@ -281,6 +281,7 @@ func New(ctx context.Context, fs apkfs.FullFS, opts ...Option) (*Context, error)
 		apk.WithIgnoreIndexSignatures(bc.o.IgnoreSignatures),
 		apk.WithAuthenticator(bc.o.Auth),
 		apk.WithTransport(bc.o.Transport),
+		apk.WithFetchWorkers(bc.o.APKFetchWorkers),
 	}
 	// only try to pass the cache dir if one of the following is true:
 	// - the user has explicitly set a cache dir
@@ -360,6 +361,10 @@ type layer struct {
 	compressed   string
 	diffid       *v1.Hash
 	desc         *v1.Descriptor
+
+	// gzipConcurrency controls the number of threads used for compression.
+	// If 0, uses the default (min(GOMAXPROCS, 8)).
+	gzipConcurrency int
 }
 
 func (l *layer) compress() error {
@@ -385,8 +390,8 @@ func (l *layer) compress() error {
 	defer bufioPool.Put(buf)
 
 	digest := sha256.New()
-	gzw := pooledGzipWriter(io.MultiWriter(digest, buf))
-	defer pgzipPool.Put(gzw)
+	gzw := newGzipWriter(io.MultiWriter(digest, buf), l.gzipConcurrency)
+	defer putGzipWriter(gzw, l.gzipConcurrency)
 
 	if _, err := io.Copy(gzw, in); err != nil {
 		return err

@@ -40,7 +40,8 @@ import (
 	"chainguard.dev/apko/pkg/options"
 )
 
-// pgzip's default is GOMAXPROCS(0)
+// defaultGzipThreads is the default number of threads for pgzip compression.
+// pgzip's default is GOMAXPROCS(0), but we cap it at 8.
 //
 // This is fine for single builds, but we will starve CPU for larger builds.
 // 8 is our max because modern laptops tend to have ~8 performance cores, and
@@ -48,23 +49,58 @@ import (
 //
 // This gives us near 100% utility on workstations, allows us to do ~8
 // concurrent builds on giant machines, and uses only 1 core on tiny machines.
-var pgzipThreads = min(runtime.GOMAXPROCS(0), 8)
+//
+// For services running many parallel builds, use options.GzipConcurrency to
+// override this default on a per-build basis.
+var defaultGzipThreads = min(runtime.GOMAXPROCS(0), 8)
 
-var pgzipPool = sync.Pool{
-	New: func() any {
-		zw := gzip.NewWriter(nil)
-		if err := zw.SetConcurrency(1<<20, pgzipThreads); err != nil {
-			// This should never happen.
-			panic(fmt.Errorf("tried to set pgzip concurrency to %d: %w", pgzipThreads, err))
-		}
-		return zw
-	},
+// pgzipPools holds pools for different concurrency levels.
+// This allows reuse of gzip writers when the same concurrency is used repeatedly.
+var pgzipPools sync.Map // map[int]*sync.Pool
+
+// getGzipPool returns a sync.Pool for gzip writers with the given concurrency.
+func getGzipPool(concurrency int) *sync.Pool {
+	if pool, ok := pgzipPools.Load(concurrency); ok {
+		return pool.(*sync.Pool)
+	}
+
+	newPool := &sync.Pool{
+		New: func() any {
+			zw := gzip.NewWriter(nil)
+			if err := zw.SetConcurrency(1<<20, concurrency); err != nil {
+				// This should never happen.
+				panic(fmt.Errorf("tried to set pgzip concurrency to %d: %w", concurrency, err))
+			}
+			return zw
+		},
+	}
+
+	// Store and return; if another goroutine stored first, that's fine - we'll just
+	// have two pools briefly, and one will be GC'd.
+	actual, _ := pgzipPools.LoadOrStore(concurrency, newPool)
+	return actual.(*sync.Pool)
 }
 
-func pooledGzipWriter(w io.Writer) *gzip.Writer {
-	zw := pgzipPool.Get().(*gzip.Writer)
+// newGzipWriter creates a gzip writer with the specified concurrency.
+// If concurrency is 0, uses the default (min(GOMAXPROCS, 8)).
+// The returned writer should be returned to the pool via putGzipWriter when done.
+func newGzipWriter(w io.Writer, concurrency int) *gzip.Writer {
+	if concurrency <= 0 {
+		concurrency = defaultGzipThreads
+	}
+	pool := getGzipPool(concurrency)
+	zw := pool.Get().(*gzip.Writer)
 	zw.Reset(w)
 	return zw
+}
+
+// putGzipWriter returns a gzip writer to its pool.
+func putGzipWriter(zw *gzip.Writer, concurrency int) {
+	if concurrency <= 0 {
+		concurrency = defaultGzipThreads
+	}
+	pool := getGzipPool(concurrency)
+	pool.Put(zw)
 }
 
 var bufioPool = sync.Pool{
@@ -91,7 +127,11 @@ type layerWriter struct {
 // newLayerWriter wraps a file with a gzipping tar writer that computes
 // everything we need to know to implement a v1.Layer, which it will
 // produce when finalize() is called.
-func newLayerWriter(out *os.File) *layerWriter {
+//
+// The gzipConcurrency parameter controls the number of threads used for
+// compression when the layer's Compressed() method is called. If 0, uses
+// the default (min(GOMAXPROCS, 8)).
+func newLayerWriter(out *os.File, gzipConcurrency int) *layerWriter {
 	diffid := sha256.New()
 
 	buf := pooledBufioWriter(out)
@@ -115,7 +155,8 @@ func newLayerWriter(out *os.File) *layerWriter {
 			}
 
 			l := &layer{
-				uncompressed: out.Name(),
+				uncompressed:    out.Name(),
+				gzipConcurrency: gzipConcurrency,
 				desc: &v1.Descriptor{
 					MediaType: v1types.OCILayer,
 				},
